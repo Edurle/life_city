@@ -4,7 +4,7 @@
 //! 基准模式：cargo run -p living-cli --release -- --bench
 //!   校准技术文档第 1 节的性能预算（决策耗时、模拟一年耗时）。
 
-use living_core::{cat_names, load_config, World};
+use living_core::{cat_names, cat_roster, human_names, load_config, World};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -27,6 +27,7 @@ fn main() {
 
     let seed: u64 = get("--seed", "42").parse().expect("种子应为整数");
     let cats: usize = get("--cats", "6").parse().expect("猫数应为整数");
+    let humans: usize = get("--humans", "0").parse().expect("人数应为整数");
     let days: u64 = get("--days", "7").parse().expect("天数应为整数");
     let assets = get("--assets", "assets/cats.json");
     let out = get("--out", "");
@@ -38,8 +39,16 @@ fn main() {
     let cfg = load_config(&json).unwrap_or_else(|e| panic!("{e}"));
 
     let ticks = days * 1440;
+    let roster = {
+        let mut r: Vec<(String, String)> = human_names(humans)
+            .into_iter()
+            .map(|n| (n, "human".to_string()))
+            .collect();
+        r.extend(cat_roster(cat_names(cats)));
+        r
+    };
     let mut world = if load_path.is_empty() {
-        let mut w = World::new(cfg, seed, cat_names(cats), true);
+        let mut w = World::new(cfg, seed, roster, true);
         w.log_meta(seed, ticks);
         w
     } else {
@@ -59,8 +68,8 @@ fn main() {
     let summaries = world.summarize();
 
     println!(
-        "模拟完成：{} 只猫 × {} 天（{} 拍，{} 次决策），耗时 {:.2}s",
-        cats,
+        "模拟完成：{} 名居民 × {} 天（{} 拍，{} 次决策），耗时 {:.2}s",
+        humans + cats,
         days,
         ticks,
         world.decisions_done,
@@ -129,7 +138,7 @@ fn bench() {
 
     println!("== 基准 1：T0 等价（128 只猫，完整模拟 30 天，含日志关闭） ==");
     let t0 = Instant::now();
-    let mut w = World::new(cfg.clone(), 99, cat_names(128), false);
+    let mut w = World::new(cfg.clone(), 99, cat_roster(cat_names(128)), false);
     w.run(30 * 1440);
     let d1 = t0.elapsed();
     let per_decision = d1.as_secs_f64() / w.decisions_done as f64 * 1e6;
@@ -146,7 +155,7 @@ fn bench() {
 
     println!("== 基准 2：全镇等价（2000 只猫模拟 30 天 → 外推一年） ==");
     let t0 = Instant::now();
-    let mut w = World::new(cfg, 99, cat_names(2000), false);
+    let mut w = World::new(cfg, 99, cat_roster(cat_names(2000)), false);
     w.run(30 * 1440);
     let d2 = t0.elapsed();
     let year = d2.as_secs_f64() * 365.0 / 30.0;

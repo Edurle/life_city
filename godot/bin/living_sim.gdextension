@@ -1,0 +1,10 @@
+; 《活城》GDExtension 描述：指向适配层动态库（由 scripts/build_godot.sh 复制）。
+[configuration]
+
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = "4.7"
+
+[libraries]
+
+linux.debug.x86_64 =     "res://bin/libgodot_adapter.so"
+linux.release.x86_64 =   "res://bin/libgodot_adapter.so"

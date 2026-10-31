@@ -20,12 +20,13 @@ pub struct SaveState {
     pub agents: Vec<crate::agent::Agent>,
     pub relations: Relations,
     pub grid: SpatialGrid,
+    pub area_states: BTreeMap<String, crate::area::AreaState>,
     pub event_schedule: Vec<Tick>,
     pub world_rng: Rng,
     pub decisions_done: u64,
 }
 
-pub const SAVE_VERSION: u32 = 2;
+pub const SAVE_VERSION: u32 = 3;
 
 impl World {
     /// 导出二进制快照。
@@ -36,6 +37,7 @@ impl World {
             agents: self.agents.clone(),
             relations: self.relations.clone(),
             grid: self.grid.clone(),
+            area_states: self.area_states.clone(),
             event_schedule: self.event_schedule.clone(),
             world_rng: self.world_rng.clone(),
             decisions_done: self.decisions_done,
@@ -69,6 +71,7 @@ impl World {
             agents: state.agents,
             relations: state.relations,
             grid: state.grid,
+            area_states: state.area_states,
             behaviors,
             spots,
             event_schedule: state.event_schedule,

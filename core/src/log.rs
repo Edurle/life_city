@@ -5,7 +5,7 @@ use crate::needs::Needs;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const LOG_VERSION: u32 = 2;
+pub const LOG_VERSION: u32 = 3;
 
 /// 决策的因素分解：系统能"报告原因"的载体。
 #[derive(Debug, Clone, Serialize)]
@@ -18,6 +18,8 @@ pub struct FactorBreakdown {
     pub need_mult: f64,
     /// 情境记忆乘数。
     pub mem_mult: f64,
+    /// 地点声誉乘数（M3）：行为所在区域的口碑与整洁度对权重的修正。
+    pub area_mult: f64,
     /// 安全感（M2）：0 = 身边没有可信任的同伴；越高，负面记忆被压制越多。
     pub comfort: f64,
     /// 第一层生理反射强制执行。
@@ -105,9 +107,35 @@ pub enum LogEvent {
         accepted: bool,
         reason: String,
     },
+    /// 地点声誉变化（M3）：一次到访体验或事件冲击进声誉统计。
+    ReputationChange {
+        tick: u64,
+        area: String,
+        /// 本次体验（−1..1；到访净值或事件效价×强度）。
+        experience: f64,
+        value: f64,
+    },
+    /// 地点状态快照（每小时）：声誉、整洁度、累计到访次数。
+    LocationState {
+        tick: u64,
+        area: String,
+        reputation: f64,
+        cleanliness: f64,
+        visits: u64,
+    },
     Summary {
         agents: Vec<AgentSummary>,
+        areas: Vec<AreaSummary>,
     },
+}
+
+/// 地点终态摘要（M3）。
+#[derive(Debug, Clone, Serialize)]
+pub struct AreaSummary {
+    pub id: String,
+    pub reputation: f64,
+    pub cleanliness: f64,
+    pub visits: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -18,8 +18,6 @@
     "memory_cap": 500,
     "memory_top_k": 8,
     "weight_jitter": 0.1,
-    "room_width": 6.0,
-    "room_height": 6.0,
     "witness_radius": 10.0,
     "comfort_radius": 2.0,
     "comfort_max": 0.8,
@@ -29,7 +27,9 @@
     "bond_player_gain": 0.15,
     "initial_bond_max": 0.3,
     "imitation_min_bond": 0.25,
-    "startle_min_salience": 0.6
+    "startle_min_salience": 0.6,
+    "map_width": 6.0,
+    "map_height": 6.0
   },
   "spots": [
     {

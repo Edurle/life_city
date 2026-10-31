@@ -7,7 +7,7 @@
 //! 运行：cargo run -p living-cli --bin living-play -- --seed 42
 
 use living_core::time::format_clock;
-use living_core::{cat_names, load_config, BehaviorStatus, LogEvent, World};
+use living_core::{cat_names, cat_roster, load_config, BehaviorStatus, LogEvent, World};
 use std::io::{self, BufRead, Write};
 
 fn main() {
@@ -32,7 +32,7 @@ fn main() {
     let cfg = load_config(&json).unwrap_or_else(|e| panic!("{e}"));
 
     let mut world = if load_path.is_empty() {
-        let mut w = World::new(cfg, seed, cat_names(cats), true);
+        let mut w = World::new(cfg, seed, cat_roster(cat_names(cats)), true);
         w.set_player(0);
         w.collect_recent = true;
         w.log_meta(seed, 0);

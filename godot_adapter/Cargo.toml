@@ -1,0 +1,12 @@
+[package]
+name = "godot_adapter"
+version = "0.1.0"
+edition = "2021"
+description = "《活城》GDExtension 适配层：把 living-core 暴露成 Godot 节点（只做翻译，不含模拟逻辑）"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+godot = { version = "0.5", features = ["api-4-7"] }
+living-core = { path = "../core" }

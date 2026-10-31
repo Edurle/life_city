@@ -2,7 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>《活城》M2 日志回放查看器</title>
+<title>《活城》M3 日志回放查看器</title>
 <style>
   :root { --bg:#1b1e24; --panel:#242830; --line:#3a3f4b; --text:#d8dce4; --dim:#8a91a0; --accent:#7aa2f7; }
   * { box-sizing:border-box; }
@@ -38,7 +38,7 @@
 </head>
 <body>
 <header>
-  <h1>《活城》M2 · 日志回放查看器</h1>
+  <h1>《活城》M3 · 日志回放查看器</h1>
   <label id="drop">拖入 .jsonl 日志文件，或点击选择<input id="file" type="file" accept=".jsonl" hidden></label>
   <span id="meta"></span>
 </header>
@@ -59,6 +59,8 @@ function parseLog(text) {
   const agents = new Map();
   const envEvents = [];
   const bondChanges = [];
+  const locationStates = [];   // {tick, area, reputation, cleanliness}
+  const repChanges = [];       // {tick, area, experience}
   let meta = null;
   const lines = text.split("\n");
   for (const line of lines) {
@@ -68,6 +70,8 @@ function parseLog(text) {
     if (ev.t === "meta") { meta = ev; continue; }
     if (ev.t === "env_event") { envEvents.push(ev); continue; }
     if (ev.t === "startled") { A(agents, ev.agent).startles.push(ev); continue; }
+    if (ev.t === "location_state") { locationStates.push(ev); continue; }
+    if (ev.t === "reputation_change") { repChanges.push(ev); continue; }
     if (ev.t === "bond_change") { bondChanges.push(ev); continue; }
     if (ev.t === "snapshot") {
       A(agents, ev.agent).snapshots.push(ev); continue;
@@ -84,7 +88,7 @@ function parseLog(text) {
     a.snapshots.sort((x,y)=>x.tick-y.tick);
     a.decisions.sort((x,y)=>x.tick-y.tick);
   }
-  return {agents, envEvents, bondChanges, meta};
+  return {agents, envEvents, bondChanges, locationStates, repChanges, meta};
 }
 function A(agents, id) {
   if (!agents.has(id)) agents.set(id, {id, snapshots:[], decisions:[], commands:[], memWrites:[], startles:[], summary:null});
@@ -159,6 +163,7 @@ function render() {
     <div class="card" style="flex:1;min-width:360px"><h3>猫群动态（环境事件 · 惊吓 · 亲密变化，最近 40 条）</h3><div id="groupFeed"></div></div>
     <div class="card" style="flex:1;min-width:360px"><h3>亲近关系（模拟结束时）</h3><div id="bondList"></div></div>
   </div>
+  <div class="card"><h3>地点声誉与整洁度（每小时快照）</h3><canvas id="areaC" width="1240" height="200"></canvas><div class="legend" id="areaLegend"></div></div>
   <div class="card"><h3>决策流水与因素分解（最近 60 次决策 · 权重 = 代理权重 × 需求 × 记忆）</h3><div id="decTable"></div></div>`;
   main.innerHTML = html;
 
@@ -172,6 +177,7 @@ function render() {
   renderMems(ag);
   renderGroupFeed();
   renderBonds(ag);
+  renderAreas();
   renderDecisions(ag);
 }
 
@@ -249,6 +255,25 @@ function renderGroupFeed() {
   items.sort((x,y)=>y.tick-x.tick);
   el.innerHTML = items.length ? items.slice(0,40).map(i=>`<div>${fmtTick(i.tick)} · ${i.html}</div>`).join("")
     : "<p class='hint'>没有猫群动态（旧版日志或没有事件）。</p>";
+}
+
+/// 地点声誉曲线（每个区域一条实线，整洁度虚线；M3）。
+function renderAreas() {
+  const el = document.getElementById("areaC");
+  if (!el || !DATA.locationStates.length) return;
+  const areas = [...new Set(DATA.locationStates.map(s => s.area))].sort();
+  const maxLen = Math.max(...areas.map(a => DATA.locationStates.filter(s => s.area === a).length));
+  const series = [];
+  areas.forEach((a, i) => {
+    const pts = DATA.locationStates.filter(s => s.area === a);
+    series.push({name: a + " 声誉", color: COLORS[i % COLORS.length], data: pts.map(s => s.reputation)});
+    series.push({name: a + " 整洁", color: COLORS[i % COLORS.length], data: pts.map(s => s.cleanliness)});
+  });
+  lineChart(el, series, {maxY: 1, marker: null});
+  // 图例只列区域名（声誉实线/整洁虚线同色）
+  document.getElementById("areaLegend").innerHTML = areas.map((a, i) =>
+    `<span><i class="sw" style="background:${COLORS[i % COLORS.length]}"></i>${a}</span>`).join("")
+    + `<span class="hint">（实线 = 声誉，同色 = 整洁度）</span>`;
 }
 
 /// 亲近关系：从汇总的 top_bonds 展示（模拟结束时点）。

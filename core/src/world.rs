@@ -14,13 +14,14 @@
 //! 代理按编号顺序结算，随机数用独立子流，回放不依赖调度细节。
 
 use crate::agent::Agent;
+use crate::area::AreaState;
 use crate::config::{BehaviorDef, Params, SimConfig, SpotDef};
-use crate::log::{AgentSummary, FactorBreakdown, LogEvent, Logger, LOG_VERSION};
+use crate::log::{AgentSummary, AreaSummary, FactorBreakdown, LogEvent, Logger, LOG_VERSION};
 use crate::needs::{urgency, Needs, NEED_KEYS};
 use crate::relation::Relations;
 use crate::rng::{derive_seed, Rng, WorldSeed};
 use crate::space::{Pos, SpatialGrid};
-use crate::time::{is_day_boundary, is_hour_boundary, quarter_of_day, Tick};
+use crate::time::{hour_of, is_day_boundary, is_hour_boundary, quarter_of_day, Tick};
 use crate::tree::available_behaviors;
 use std::collections::BTreeMap;
 
@@ -39,6 +40,8 @@ pub struct ChoiceInfo {
     pub weight: f64,
     pub need_mult: f64,
     pub mem_mult: f64,
+    /// 地点声誉乘数（M3）：行为所在区域的口碑与整洁度修正。
+    pub area_mult: f64,
     pub eff: f64,
 }
 
@@ -69,6 +72,8 @@ pub struct World {
     pub agents: Vec<Agent>,
     pub relations: Relations,
     pub(crate) grid: SpatialGrid,
+    /// 地点状态（M3）：声誉与整洁度，键为区域 ID。
+    pub area_states: BTreeMap<String, AreaState>,
     pub(crate) behaviors: BTreeMap<String, BehaviorDef>,
     pub(crate) spots: BTreeMap<String, SpotDef>,
     /// 环境事件的下一次发生拍（与 cfg.env_events 下标对应）。
@@ -83,7 +88,13 @@ pub struct World {
 }
 
 impl World {
-    pub fn new(cfg: SimConfig, seed: WorldSeed, agent_names: Vec<String>, logging: bool) -> Self {
+    /// 建世界。roster = (名字, 物种)——物种决定用哪棵行为树（M3 人类与猫同街）。
+    pub fn new(
+        cfg: SimConfig,
+        seed: WorldSeed,
+        roster: Vec<(String, String)>,
+        logging: bool,
+    ) -> Self {
         let behaviors: BTreeMap<String, BehaviorDef> = cfg
             .behaviors
             .iter()
@@ -94,16 +105,19 @@ impl World {
             .iter()
             .map(|s| (s.id.clone(), s.clone()))
             .collect();
-        let behavior_list: Vec<(String, f64)> = cfg
-            .behaviors
-            .iter()
-            .map(|b| (b.id.clone(), b.base_weight))
-            .collect();
-        let agents = agent_names
+        let agents = roster
             .into_iter()
             .enumerate()
-            .map(|(i, name)| Agent::new(seed, i as u32, name, &behavior_list, &cfg.params))
+            .map(|(i, (name, species))| {
+                let behavior_list = cfg.species_behaviors(&species);
+                Agent::new(seed, i as u32, name, species, &behavior_list, &cfg.params)
+            })
             .collect::<Vec<_>>();
+        let area_states: BTreeMap<String, AreaState> = cfg
+            .areas
+            .iter()
+            .map(|a| (a.id.clone(), AreaState::from_def(a)))
+            .collect();
         // 同屋檐下的猫互相有点眼熟（仅小群体；见常量注释）。
         let mut relations = Relations::new(cfg.params.comfort_min_bond);
         if agents.len() <= INITIAL_BOND_GROUP_CAP {
@@ -135,6 +149,7 @@ impl World {
             agents,
             relations,
             grid,
+            area_states,
             behaviors,
             spots,
             event_schedule,
@@ -171,24 +186,60 @@ impl World {
         self.grid.move_to(id, pos);
     }
 
+    /// 读取第 idx 个事件的下次发生拍（测试用）。
+    pub fn event_next_at(&self, idx: usize) -> Tick {
+        self.event_schedule[idx]
+    }
+
+    /// 手动排程第 idx 个事件到指定拍（测试用）。
+    pub fn schedule_event_at(&mut self, idx: usize, at: Tick) {
+        self.event_schedule[idx] = at;
+    }
+
     /// 代理的当前位置。
     pub fn agent_pos(&self, id: u32) -> Option<Pos> {
         self.agents.iter().find(|a| a.id == id).map(|a| a.pos)
     }
 
     /// 手动触发第 idx 个环境事件于指定位置（测试与调试工具用；
-    /// 与随机排程走完全相同的应用逻辑）。
+    /// 与随机排程走完全相同的应用逻辑，含地点声誉冲击）。
     pub fn trigger_env_event(&mut self, idx: usize, pos: Pos) {
         let quarter = quarter_of_day(self.tick);
         let mut events = Vec::new();
         let tick = self.tick;
+        let def = self.cfg.env_events[idx].clone();
         events.push(LogEvent::EnvEvent {
             tick,
-            event: self.cfg.env_events[idx].id.clone(),
+            event: def.id.clone(),
             pos,
         });
-        self.apply_env_event(idx, pos, quarter, &mut events);
+        let had_direct_victims = self.apply_env_event(idx, pos, quarter, &mut events);
+        self.area_reputation_hit(&def, had_direct_victims, tick, &mut events);
         self.emit(events);
+    }
+
+    /// 区域事件的口碑冲击：效价×强度进声誉统计（alpha 放大——
+    /// 一次吓人事件顶多次平淡到访）。
+    fn area_reputation_hit(
+        &mut self,
+        def: &crate::config::EnvEventDef,
+        had_direct_victims: bool,
+        tick: Tick,
+        events: &mut Vec<LogEvent>,
+    ) {
+        if let (Some(aid), true) = (&def.area, had_direct_victims) {
+            if let Some(state) = self.area_states.get_mut(aid) {
+                let exp = def.valence * def.intensity;
+                let alpha = self.cfg.params.area_exp_alpha * 2.5;
+                let value = state.experience(exp, alpha);
+                events.push(LogEvent::ReputationChange {
+                    tick,
+                    area: aid.clone(),
+                    experience: exp,
+                    value,
+                });
+            }
+        }
     }
 
     /// 代理当前的安全感（0..comfort_max）：身边最近的、亲密值达标的同伴决定。
@@ -205,7 +256,15 @@ impl World {
         let tick = self.tick;
         let comfort = self.agent_comfort(id);
         if let Some(a) = self.agents.iter_mut().find(|a| a.id == id) {
-            compute_options(&self.cfg, &self.behaviors, &self.spots, a, tick, comfort)
+            compute_options(
+                &self.cfg,
+                &self.behaviors,
+                &self.spots,
+                &self.area_states,
+                a,
+                tick,
+                comfort,
+            )
         } else {
             Vec::new()
         }
@@ -248,10 +307,14 @@ impl World {
         let tick = self.tick;
         let mut events: Vec<LogEvent> = Vec::new();
 
-        // 日界：记忆习惯化回落与强度消退。
+        // 日界：记忆习惯化回落与强度消退、地点整洁度恢复（清洁服务）。
         if is_day_boundary(tick) {
             for a in &mut self.agents {
                 a.memory.daily_decay();
+            }
+            let clean = self.cfg.params.clean_daily;
+            for state in self.area_states.values_mut() {
+                state.daily_clean(clean);
             }
         }
 
@@ -271,17 +334,36 @@ impl World {
             .collect();
         for i in due {
             let def = self.cfg.env_events[i].clone();
+            let hour = hour_of(tick) as u32;
+            // 时间窗事件不在窗内：跳到下一个窗口起点再触发（昼夜节律）。
+            if !def.in_window(hour) {
+                let from = def.from_hour.unwrap_or(0);
+                self.event_schedule[i] = crate::time::next_window_tick(tick, from);
+                continue;
+            }
             let quarter = quarter_of_day(tick);
-            // 事件发生位置：全房间事件记中心，其余在房间里均匀采样。
-            let pos = if def.radius > 0.0 {
+            // 事件发生位置：区域事件在区域矩形内采样，全图事件均匀采样，
+            // 全域事件（radius 0 且无区域）记地图中心。
+            let pos = if let Some(aid) = &def.area {
+                let a = self
+                    .cfg
+                    .areas
+                    .iter()
+                    .find(|a| &a.id == aid)
+                    .expect("校验已保证区域存在");
                 (
-                    self.world_rng.uniform(0.0, self.cfg.params.room_width),
-                    self.world_rng.uniform(0.0, self.cfg.params.room_height),
+                    self.world_rng.uniform(a.x, a.x + a.w),
+                    self.world_rng.uniform(a.y, a.y + a.h),
+                )
+            } else if def.radius > 0.0 {
+                (
+                    self.world_rng.uniform(0.0, self.cfg.params.map_width),
+                    self.world_rng.uniform(0.0, self.cfg.params.map_height),
                 )
             } else {
                 (
-                    self.cfg.params.room_width / 2.0,
-                    self.cfg.params.room_height / 2.0,
+                    self.cfg.params.map_width / 2.0,
+                    self.cfg.params.map_height / 2.0,
                 )
             };
             events.push(LogEvent::EnvEvent {
@@ -289,14 +371,16 @@ impl World {
                 event: def.id.clone(),
                 pos,
             });
-            self.apply_env_event(i, pos, quarter, &mut events);
+            let had_direct_victims = self.apply_env_event(i, pos, quarter, &mut events);
+            // 地点声誉（M3）：区域内发生的显著事件冲击口碑。
+            self.area_reputation_hit(&def, had_direct_victims, tick, &mut events);
             self.event_schedule[i] = tick
                 + self
                     .world_rng
                     .uniform_int(def.interval_min, def.interval_max);
         }
 
-        // 小时边界：习惯衰减、意志力缓慢回复、状态快照。
+        // 小时边界：习惯衰减、意志力缓慢回复、状态快照、地点状态快照。
         if is_hour_boundary(tick) {
             let rate = self.cfg.params.habit_decay_hourly;
             for a in &mut self.agents {
@@ -310,6 +394,17 @@ impl World {
                         weights: a.weights.clone(),
                         memories: a.memory.entries.len(),
                         willpower: a.willpower,
+                    });
+                }
+            }
+            if self.logger.enabled {
+                for (aid, state) in &self.area_states {
+                    events.push(LogEvent::LocationState {
+                        tick,
+                        area: aid.clone(),
+                        reputation: state.reputation,
+                        cleanliness: state.cleanliness,
+                        visits: state.visits,
                     });
                 }
             }
@@ -395,6 +490,38 @@ impl World {
                     });
                 }
             }
+            // M3 地点声誉：行为完成 = 一次到访体验。体验 = 需求净值（饿了吃饭
+            // 是好体验），到访同时留下脏乱。正体验拉高声誉、负体验压低——
+            // 衰退与恢复由同一机制产生（设计稿 5.1）。
+            if let Some(d) = &def {
+                let area_id = d
+                    .spot
+                    .as_ref()
+                    .and_then(|s| self.spots.get(s))
+                    .and_then(|s| s.area.clone());
+                if let Some(aid) = area_id {
+                    if let Some(state) = self.area_states.get_mut(&aid) {
+                        let exp = behavior_experience(d);
+                        let value = state.experience(exp, self.cfg.params.area_exp_alpha);
+                        let litter_scale = self
+                            .cfg
+                            .areas
+                            .iter()
+                            .find(|a| a.id == aid)
+                            .map(|a| a.litter_scale)
+                            .unwrap_or(1.0);
+                        state.litter(self.cfg.params.visit_litter * litter_scale);
+                        if self.logger.enabled {
+                            events.push(LogEvent::ReputationChange {
+                                tick,
+                                area: aid.clone(),
+                                experience: exp,
+                                value,
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         // 心跳决策（空闲且到期的代理；字段级借用避免冲突）。
@@ -402,12 +529,13 @@ impl World {
         let cfg = &self.cfg;
         let behaviors = &self.behaviors;
         let spots = &self.spots;
+        let area_states = &self.area_states;
         let relations = &self.relations;
         let grid = &mut self.grid;
         for a in agents.iter_mut() {
             if a.current.is_none() && tick >= a.next_heartbeat {
                 let comfort = comfort_of(grid, relations, &cfg.params, a);
-                events.extend(decide(cfg, behaviors, spots, a, tick, comfort));
+                events.extend(decide(cfg, behaviors, spots, area_states, a, tick, comfort));
                 self.decisions_done += 1;
                 // 行为开始 → 移动到行为地点（无地点行为原地不动）。
                 if let Some((bid, _, _)) = &a.current {
@@ -425,7 +553,14 @@ impl World {
     }
 
     /// 应用一个环境事件于指定位置：直接经历写入、惊吓反应、目睹传播。
-    fn apply_env_event(&mut self, idx: usize, pos: Pos, quarter: u8, events: &mut Vec<LogEvent>) {
+    /// 返回是否有直接受影响的代理（供地点声誉结算判定）。
+    fn apply_env_event(
+        &mut self,
+        idx: usize,
+        pos: Pos,
+        quarter: u8,
+        events: &mut Vec<LogEvent>,
+    ) -> bool {
         let def = self.cfg.env_events[idx].clone();
         let tick = self.tick;
         let tag_map: BTreeMap<String, Vec<String>> = self
@@ -457,6 +592,7 @@ impl World {
         // 反应明显（直接显著性 ≥ 0.3）的遭遇，会被附近的同伴目睹。
         let affected_set: std::collections::HashSet<u32> = affected.iter().copied().collect();
         let mut notable: Vec<u32> = Vec::new();
+        let mut had_direct_victims = false;
         for a in &mut self.agents {
             if !affected_set.contains(&a.id) {
                 continue;
@@ -482,6 +618,7 @@ impl World {
                 tick,
             );
             if salience >= 0.05 {
+                had_direct_victims = true;
                 events.push(LogEvent::MemoryWrite {
                     tick,
                     agent: a.id,
@@ -555,6 +692,7 @@ impl World {
                 }
             }
         }
+        had_direct_victims
     }
 
     // ---------- 玩家指令（意志节点） ----------
@@ -587,7 +725,15 @@ impl World {
         };
         let comfort = self.agent_comfort(agent_id);
         let a = self.agents.iter_mut().find(|a| a.id == agent_id).unwrap();
-        let options = compute_options(&self.cfg, &self.behaviors, &self.spots, a, tick, comfort);
+        let options = compute_options(
+            &self.cfg,
+            &self.behaviors,
+            &self.spots,
+            &self.area_states,
+            a,
+            tick,
+            comfort,
+        );
         // 生理反射压倒一切：临界需求未解决时，只接受对应的恢复行为。
         let forced = forced_choice(&self.cfg, &self.behaviors, &a.needs, &options);
         let (cost, refusal) = match options.iter().find(|o| o.behavior == behavior) {
@@ -694,7 +840,15 @@ impl World {
         };
         let tick = self.tick;
         let comfort = comfort_of(&self.grid, &self.relations, &self.cfg.params, a);
-        let options = compute_options(&self.cfg, &self.behaviors, &self.spots, a, tick, comfort);
+        let options = compute_options(
+            &self.cfg,
+            &self.behaviors,
+            &self.spots,
+            &self.area_states,
+            a,
+            tick,
+            comfort,
+        );
         let eff_max = options
             .iter()
             .map(|o| o.eff)
@@ -779,8 +933,19 @@ impl World {
                 top_bonds,
             });
         }
+        let areas: Vec<AreaSummary> = self
+            .area_states
+            .iter()
+            .map(|(id, s)| AreaSummary {
+                id: id.clone(),
+                reputation: s.reputation,
+                cleanliness: s.cleanliness,
+                visits: s.visits,
+            })
+            .collect();
         self.logger.log(&LogEvent::Summary {
             agents: summaries.clone(),
+            areas,
         });
         summaries
     }
@@ -792,11 +957,12 @@ fn decide(
     cfg: &SimConfig,
     behaviors: &BTreeMap<String, BehaviorDef>,
     spots: &BTreeMap<String, SpotDef>,
+    area_states: &BTreeMap<String, AreaState>,
     a: &mut Agent,
     tick: Tick,
     comfort: f64,
 ) -> Vec<LogEvent> {
-    let options = compute_options(cfg, behaviors, spots, a, tick, comfort);
+    let options = compute_options(cfg, behaviors, spots, area_states, a, tick, comfort);
 
     let (choice, factors) = if let Some(cmd) = a.pending_command.take() {
         // 第四层：玩家指令覆盖（成本已在 issue_command 结算）。
@@ -808,6 +974,7 @@ fn decide(
                     weight: o.weight,
                     need_mult: o.need_mult,
                     mem_mult: o.mem_mult,
+                    area_mult: o.area_mult,
                     comfort,
                     forced: false,
                     will_command: true,
@@ -820,6 +987,7 @@ fn decide(
                     weight: a.weights.get(&cmd).copied().unwrap_or(1.0),
                     need_mult: 1.0,
                     mem_mult: 1.0,
+                    area_mult: 1.0,
                     comfort,
                     forced: false,
                     will_command: true,
@@ -835,6 +1003,7 @@ fn decide(
                 weight: 1.0,
                 need_mult: 1.0,
                 mem_mult: 1.0,
+                area_mult: 1.0,
                 comfort,
                 forced: true,
                 will_command: false,
@@ -852,6 +1021,7 @@ fn decide(
                 weight: info.weight,
                 need_mult: urgency(a.needs.get(drive).unwrap_or(100.0)),
                 mem_mult: 1.0,
+                area_mult: info.area_mult,
                 comfort,
                 forced: true,
                 will_command: false,
@@ -869,6 +1039,7 @@ fn decide(
                 weight: o.weight,
                 need_mult: o.need_mult,
                 mem_mult: o.mem_mult,
+                area_mult: o.area_mult,
                 comfort,
                 forced: false,
                 will_command: false,
@@ -919,20 +1090,29 @@ fn comfort_of(grid: &SpatialGrid, relations: &Relations, params: &Params, a: &Ag
 }
 
 /// 计算当前全部可用行为及其权重分解（决策、菜单、指令定价共用）。
-/// 同一地点的行为共享一次记忆查询（查询结果只依赖地点标签与时段）。
+/// 物种决定用哪棵树；同一地点的行为共享一次记忆查询与地点乘数
+/// （两者都只依赖地点与时段）。
+#[allow(clippy::too_many_arguments)]
 fn compute_options(
     cfg: &SimConfig,
     behaviors: &BTreeMap<String, BehaviorDef>,
     spots: &BTreeMap<String, SpotDef>,
+    area_states: &BTreeMap<String, AreaState>,
     a: &mut Agent,
     tick: Tick,
     comfort: f64,
 ) -> Vec<ChoiceInfo> {
     let mut avail: Vec<&str> = Vec::new();
-    available_behaviors(&cfg.tree, &a.needs, behaviors, &mut avail);
+    available_behaviors(
+        cfg.tree_for(&a.species),
+        &a.needs,
+        behaviors,
+        hour_of(tick) as u32,
+        &mut avail,
+    );
     let quarter = quarter_of_day(tick);
-    // 地点 → 记忆乘数表（本决策内缓存；无地点行为共用空表）。
-    let mut spot_mems: Vec<(Option<&str>, BTreeMap<String, f64>)> = Vec::new();
+    // 地点 → (记忆乘数表, 地点声誉乘数)（本决策内缓存；无地点行为共用空表）。
+    let mut spot_mems: Vec<(Option<&str>, BTreeMap<String, f64>, f64)> = Vec::new();
     avail
         .iter()
         .map(|b| {
@@ -945,15 +1125,24 @@ fn compute_options(
                 0.6 // 非恢复型悠闲行为的温和默认驱力
             };
             let spot_id = def.spot.as_deref();
-            let mem_map = match spot_mems.iter_mut().find(|(s, _)| *s == spot_id) {
-                Some((_, m)) => m,
+            let (mem_map, area_mult) = match spot_mems.iter_mut().find(|(s, _, _)| *s == spot_id) {
+                Some((_, m, am)) => (&*m, *am),
                 None => {
                     let spot_tags: Vec<String> = spot_id
                         .and_then(|s| spots.get(s))
                         .map(|s| s.tags.clone())
                         .unwrap_or_default();
-                    spot_mems.push((spot_id, a.memory.query(quarter, &spot_tags, comfort)));
-                    &mut spot_mems.last_mut().unwrap().1
+                    let am = spot_id
+                        .and_then(|s| spots.get(s))
+                        .and_then(|s| s.area.as_deref())
+                        .and_then(|aid| area_states.get(aid))
+                        .map(|st| {
+                            st.behavior_mult(cfg.params.area_mult_min, cfg.params.area_mult_span)
+                        })
+                        .unwrap_or(1.0);
+                    spot_mems.push((spot_id, a.memory.query(quarter, &spot_tags, comfort), am));
+                    let (_, m, am) = spot_mems.last_mut().unwrap();
+                    (&*m, *am)
                 }
             };
             let mm: f64 = def
@@ -968,10 +1157,18 @@ fn compute_options(
                 weight: w,
                 need_mult: nm,
                 mem_mult: mm,
-                eff: w * nm * mm,
+                area_mult,
+                eff: w * nm * mm * area_mult,
             }
         })
         .collect()
+}
+
+/// 行为完成对到访地点的体验净值（需求效果求和 /100，钳制 −1..1）：
+/// 饿了吃饭是 +0.5 的好体验，纯消耗的闲逛略负。
+fn behavior_experience(def: &BehaviorDef) -> f64 {
+    let net: f64 = def.effects.values().sum::<f64>() / 70.0;
+    net.clamp(-1.0, 1.0)
 }
 
 /// 第一层生理反射：任一需求低于临界值时，返回恢复量最大的可用行为。
@@ -1058,6 +1255,22 @@ pub fn tv_distance(a: &BTreeMap<String, f64>, b: &BTreeMap<String, f64>) -> f64 
         .iter()
         .map(|k| (a.get(*k).copied().unwrap_or(0.0) - b.get(*k).copied().unwrap_or(0.0)).abs())
         .sum::<f64>()
+}
+
+/// 名单转猫群 roster（全部物种 cat）。
+pub fn cat_roster(names: Vec<String>) -> Vec<(String, String)> {
+    names.into_iter().map(|n| (n, "cat".to_string())).collect()
+}
+
+/// 生成人类的默认名字。
+pub fn human_names(n: usize) -> Vec<String> {
+    const SURNAMES: [&str; 6] = ["陈", "林", "王", "赵", "苏", "何"];
+    const GIVEN: [&str; 8] = [
+        "晓东", "雨桐", "建国", "小满", "志强", "文静", "大海", "阿福",
+    ];
+    (0..n)
+        .map(|i| format!("{}{}", SURNAMES[i % SURNAMES.len()], GIVEN[i % GIVEN.len()]))
+        .collect()
 }
 
 /// 生成猫的默认名字。

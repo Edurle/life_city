@@ -15,9 +15,10 @@ city_life_simulator — 概率行为树驱动的第一人称生活模拟游戏�
 - 表现：2.5D 街区视角，Godot 为首选客户端候选（M3 竖切验证 godot-rust）；时间速度档 暂停/×1/×2/×10/×100（正常 1 现实秒 = 1 模拟分钟）由表现层控制。
 - 项目代码目录只放代码。
 
-## 代码结构（M2 完成）
-- `core/`（crate living-core）：`rng.rs` 确定性随机数、`time.rs` 时间、`needs.rs` 需求、`config.rs` 数据配置与校验、`tree.rs` 树可用性评估、`memory.rs` 记忆表（桶索引泛化检索 + 缓存 + valence + 间接记忆）、`space.rs` 空间哈希网格、`relation.rs` 关系表、`agent.rs` 代理（含意志力、位置）、`world.rs` 调度与决策核心（事件半径与目睹传播、惊吓、亲密增长、安全感）、`log.rs` JSONL 日志（v2）、`save.rs` bincode 快照存档（v2）。
-- `cli/`（crate living-cli）：`living-cli` 批量运行（支持 `--save/--load`）与 `--bench` 基准；`living-play` 终端交互调试器（编号菜单指挥玩家的猫，猫群动态播报，退出自动存档可续玩）。
-- `assets/cats.json`：猫的行为注册表/树/环境事件/地点坐标（中文显示名，调参数值改这里，不改代码）。
-- `viewer/`：日志回放查看器（需求与意志力曲线、决策因素分解含安全感、猫群动态、亲近关系），静态网页零依赖。
-- 进度：M0、M1、M2 完成（《M0/M1/M2 开发记录》，测试 42 个全过）；下一步 M3 一条街（人类角色、街道地图、昼夜、地点声誉，godot-rust 竖切验证）。
+## 代码结构（M3 完成）
+- `core/`（crate living-core）：`rng.rs` 确定性随机数、`time.rs` 时间（小时窗）、`needs.rs` 需求、`config.rs` 数据配置与校验（多物种树、区域、时间窗事件）、`tree.rs` 树可用性评估（需求门 + 时间门）、`memory.rs` 记忆表（桶索引泛化检索 + 缓存 + valence + 间接记忆）、`space.rs` 空间哈希网格、`relation.rs` 关系表（含安全感来源名单）、`area.rs` 地点状态（声誉 EMA + 整洁度）、`agent.rs` 代理（物种、意志力、位置）、`world.rs` 调度与决策核心（事件半径/区域/时间窗、目睹传播、惊吓、亲密增长、安全感、地点声誉反馈）、`log.rs` JSONL 日志（v3）、`save.rs` bincode 快照存档（v3）。
+- `cli/`（crate living-cli）：`living-cli` 批量运行（`--humans/--cats` 混合物种，`--save/--load`）与 `--bench` 基准；`living-play` 终端交互调试器。
+- `godot_adapter/`（crate godot_adapter）+ `godot/`：M3 表现竖切。GDExtension（godot-rust 0.5，API 4.7）：区域按声誉着色、MultiMesh 批量渲染代理、⏸/×1/×2/×10/×100 速度档、事件播报。构建：`scripts/build_godot.sh`。
+- `assets/`：`cats.json`（单房间猫群）、`street.json`（一条街：人类+猫、四区域、昼夜事件）。调参数值改这里，不改代码。
+- `viewer/`：日志回放查看器（需求/意志力曲线、决策因素分解含安全感与地点乘数、猫群动态、亲近关系、地点声誉曲线），静态网页零依赖。
+- 进度：M0–M3 完成（《M0–M3 开发记录》，测试 52 个全过）；下一步 M4 玩家的人生（LOD 分层实装、习惯自动化、负面记忆恢复、密友查看、限期目标——意志系统手感在此阶段评估）。

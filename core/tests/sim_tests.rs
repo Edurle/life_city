@@ -3,7 +3,7 @@
 //! 2) 分化：同初始条件的猫，经历不同后行为分布显著分化（验收标准）；
 //! 3) 记忆影响分布：恐惧事件后"躲藏"类行为占比上升（系统能报告原因）。
 
-use living_core::{cat_names, load_config, World};
+use living_core::{cat_names, cat_roster, load_config, World};
 use std::collections::BTreeMap;
 
 fn test_config(noisy: bool) -> String {
@@ -84,7 +84,7 @@ fn test_config(noisy: bool) -> String {
 
 fn run_once(json: &str, seed: u64, cats: usize, days: u64) -> World {
     let cfg = load_config(json).unwrap();
-    let mut w = World::new(cfg, seed, cat_names(cats), true);
+    let mut w = World::new(cfg, seed, cat_roster(cat_names(cats)), true);
     w.log_meta(seed, days * 1440);
     w.run(days * 1440);
     w
@@ -157,6 +157,7 @@ fn habit_accumulates_and_decays_toward_base() {
         1,
         0,
         "测试猫".into(),
+        "cat".into(),
         &[("sleep".into(), 3.0)],
         &load_config(&test_config(false)).unwrap().params,
     );
@@ -180,7 +181,7 @@ fn memory_query_shifts_softmax_toward_hide() {
     use living_core::world::softmax_pick;
 
     let cfg = load_config(&test_config(false)).unwrap();
-    let mut a = living_core::Agent::new(1, 0, "猫".into(), &[], &cfg.params);
+    let mut a = living_core::Agent::new(1, 0, "猫".into(), "cat".into(), &[], &cfg.params);
     // 手工写一条强烈恐惧记忆（时段 3 = 夜晚）。
     let mut mults = BTreeMap::new();
     mults.insert("hide".to_string(), 5.0);
@@ -221,7 +222,7 @@ fn memory_query_shifts_softmax_toward_hide() {
 
 fn player_world(days_run: u64) -> World {
     let cfg = load_config(&test_config(false)).unwrap();
-    let mut w = World::new(cfg, 7, cat_names(2), true);
+    let mut w = World::new(cfg, 7, cat_roster(cat_names(2)), true);
     w.set_player(0);
     w.log_meta(7, 0);
     w.run(days_run * 1440);
@@ -339,7 +340,12 @@ fn interrupting_costs_extra_willpower() {
 #[test]
 fn save_load_resumes_identically() {
     let json = &test_config(true);
-    let mut a = World::new(load_config(json).unwrap(), 5, cat_names(2), true);
+    let mut a = World::new(
+        load_config(json).unwrap(),
+        5,
+        cat_roster(cat_names(2)),
+        true,
+    );
     a.set_player(0);
     a.run(900);
     a.issue_command(0, "explore_room");
@@ -360,7 +366,7 @@ fn save_load_resumes_identically() {
 #[test]
 fn snapshot_rejects_version_mismatch() {
     let cfg = load_config(&test_config(false)).unwrap();
-    let mut w = World::new(cfg.clone(), 1, cat_names(1), true);
+    let mut w = World::new(cfg.clone(), 1, cat_roster(cat_names(1)), true);
     w.run(10);
     let mut bytes = w.to_save();
     bytes[0] = 99; // 破坏版本号
@@ -372,7 +378,7 @@ fn snapshot_rejects_version_mismatch() {
 #[test]
 fn m1_acceptance_sleepy_cat_story() {
     let cfg = load_config(&test_config(false)).unwrap();
-    let mut w = World::new(cfg, 3, cat_names(1), true);
+    let mut w = World::new(cfg, 3, cat_roster(cat_names(1)), true);
     w.set_player(0);
     // 等到猫睡着（睡大觉或窗台打盹；能量衰减到门槛后必然发生）。
     let mut sleeping = false;
@@ -512,7 +518,7 @@ fn m2_config() -> String {
 #[test]
 fn startle_interrupts_current_behavior() {
     let cfg = load_config(&m2_config()).unwrap();
-    let mut w = World::new(cfg, 5, cat_names(1), true);
+    let mut w = World::new(cfg, 5, cat_roster(cat_names(1)), true);
     w.collect_recent = true;
     // 等猫开始做某件事。
     for _ in 0..3000 {
@@ -541,7 +547,7 @@ fn startle_interrupts_current_behavior() {
 #[test]
 fn hiding_cat_is_immune() {
     let cfg = load_config(&m2_config()).unwrap();
-    let mut w = World::new(cfg, 5, cat_names(1), true);
+    let mut w = World::new(cfg, 5, cat_roster(cat_names(1)), true);
     w.collect_recent = true;
     w.agents[0].pending_command = Some("hide_box".into());
     w.agents[0].next_heartbeat = w.tick + 1;
@@ -562,7 +568,7 @@ fn hiding_cat_is_immune() {
 #[test]
 fn vicarious_memory_spread_through_bond() {
     let cfg = load_config(&m2_config()).unwrap();
-    let mut w = World::new(cfg, 5, cat_names(3), true);
+    let mut w = World::new(cfg, 5, cat_roster(cat_names(3)), true);
     w.collect_recent = true;
     // 0=目击者，1=受害者，2=陌生对照。清除全部初始关系，只留 0-1 亲密。
     w.set_bond(0, 1, 0.9);
@@ -623,7 +629,7 @@ fn vicarious_memory_spread_through_bond() {
 fn witnessed_fear_raises_hiding_share() {
     let hide_share = |bond: f64, seed: u64| -> f64 {
         let cfg = load_config(&m2_config()).unwrap();
-        let mut w = World::new(cfg, seed, cat_names(3), false);
+        let mut w = World::new(cfg, seed, cat_roster(cat_names(3)), false);
         w.set_bond(0, 1, bond);
         w.set_bond(0, 2, 0.0);
         w.set_bond(1, 2, 0.0);
@@ -669,7 +675,7 @@ fn witnessed_fear_raises_hiding_share() {
 fn companionship_reduces_avoidance() {
     let make = || {
         let cfg = load_config(&m2_config()).unwrap();
-        let mut w = World::new(cfg, 5, cat_names(2), true);
+        let mut w = World::new(cfg, 5, cat_roster(cat_names(2)), true);
         w.set_player(0);
         w.set_bond(0, 1, 1.0);
         w.teleport(1, (3.0, 3.0));
@@ -720,7 +726,7 @@ fn companionship_reduces_avoidance() {
 #[test]
 fn bond_grows_on_shared_social_behavior() {
     let cfg = load_config(&m2_config()).unwrap();
-    let mut w = World::new(cfg, 5, cat_names(2), true);
+    let mut w = World::new(cfg, 5, cat_roster(cat_names(2)), true);
     w.collect_recent = true;
     // 两只猫社交需求都低（门开），同一拍开始蹭沙发。
     for a in w.agents.iter_mut() {
@@ -748,7 +754,7 @@ fn bond_grows_on_shared_social_behavior() {
 fn save_load_m2_roundtrip() {
     let json = m2_config();
     let cfg = load_config(&json).unwrap();
-    let mut a = World::new(cfg.clone(), 5, cat_names(3), true);
+    let mut a = World::new(cfg.clone(), 5, cat_roster(cat_names(3)), true);
     a.run(600);
     a.set_bond(0, 1, 0.77);
     a.teleport(2, (1.5, 2.5));
@@ -766,5 +772,280 @@ fn save_load_m2_roundtrip() {
         b.logger.buf,
         a.logger.buf[offset..],
         "读档继续的日志应与连续运行一致"
+    );
+}
+
+// ---------- M3：一条街——昼夜、物种、地点声誉 ----------
+
+/// M3 测试配置：公园 + 住宅两个区域，人类居民，公园滋事/音乐会事件
+/// （间隔设为极大值，测试手动触发，排除随机排程干扰）。
+fn m3_config() -> String {
+    r#"{
+  "needs": {"hunger": 4.5, "energy": 3.0, "fun": 5.0, "social": 3.0, "hygiene": 2.0, "bladder": 4.0},
+  "critical_need": 15,
+  "params": {
+    "alpha": 0.06, "habit_decay_hourly": 0.02,
+    "temperature_min": 0.7, "temperature_max": 1.4,
+    "heartbeat_min": 5, "heartbeat_max": 20,
+    "memory_cap": 500, "memory_top_k": 8, "weight_jitter": 0.1,
+    "map_width": 20.0, "map_height": 10.0,
+    "witness_radius": 10.0, "comfort_radius": 2.0, "comfort_max": 0.8,
+    "imitation_factor": 0.7, "imitation_min_bond": 0.25, "startle_min_salience": 0.6,
+    "bond_social_gain": 0.08, "bond_player_gain": 0.15, "initial_bond_max": 0.3,
+    "area_exp_alpha": 0.15, "area_mult_min": 0.35, "area_mult_span": 1.1,
+    "visit_litter": 0.004, "clean_daily": 0.35
+  },
+  "areas": [
+    {"id": "park", "name": "公园", "x": 0, "y": 0, "w": 10, "h": 10},
+    {"id": "home", "name": "住宅", "x": 10, "y": 0, "w": 10, "h": 10, "litter_scale": 0.1}
+  ],
+  "spots": [
+    {"id": "lawn", "tags": ["park", "outdoor"], "x": 5, "y": 5, "area": "park"},
+    {"id": "bench", "tags": ["park", "outdoor"], "x": 3, "y": 3, "area": "park"},
+    {"id": "bed_h", "tags": ["home", "sleep"], "x": 15, "y": 5, "area": "home"},
+    {"id": "table", "tags": ["home", "food"], "x": 14, "y": 5, "area": "home"},
+    {"id": "sofa_h", "tags": ["home"], "x": 12, "y": 2, "area": "home"}
+  ],
+  "behaviors": [
+    {"id": "sleep_home", "name": "在家睡觉", "base_weight": 3.0, "duration_min": 300, "duration_max": 480,
+     "effects": {"energy": 55}, "tags": ["sleep", "home"], "spot": "bed_h"},
+    {"id": "eat_home", "name": "在家吃饭", "base_weight": 3.0, "duration_min": 20, "duration_max": 40,
+     "effects": {"hunger": 50, "fun": 5}, "tags": ["food", "home"], "spot": "table",
+     "gate_need": "hunger", "gate_below": 70},
+    {"id": "walk_park", "name": "逛公园", "base_weight": 2.2, "duration_min": 30, "duration_max": 90,
+     "effects": {"fun": 20, "energy": -5}, "tags": ["park", "outdoor"], "spot": "lawn"},
+    {"id": "bench_sit", "name": "长椅小坐", "base_weight": 1.5, "duration_min": 20, "duration_max": 60,
+     "effects": {"fun": 8, "energy": 8}, "tags": ["park", "outdoor"], "spot": "bench"},
+    {"id": "watch_tv", "name": "看电视", "base_weight": 1.2, "duration_min": 30, "duration_max": 90,
+     "effects": {"fun": 15, "social": 5}, "tags": ["relax", "home"], "spot": "sofa_h"}
+  ],
+  "tree": {
+    "type": "selector",
+    "children": [
+      {"type": "gate", "need": "hunger", "below": 70, "child": {"type": "action", "behavior": "eat_home"}},
+      {"type": "time_gate", "from": 22, "to": 6, "child": {"type": "gate", "need": "energy", "below": 80, "child": {"type": "action", "behavior": "sleep_home"}}},
+      {"type": "gate", "need": "energy", "below": 45, "child": {"type": "action", "behavior": "sleep_home"}},
+      {"type": "time_gate", "from": 6, "to": 21, "child": {"type": "selector", "children": [
+        {"type": "action", "behavior": "walk_park"},
+        {"type": "action", "behavior": "bench_sit"}
+      ]}},
+      {"type": "action", "behavior": "watch_tv"}
+    ]
+  },
+  "env_events": [
+    {
+      "id": "park_rowdy", "name": "公园醉汉滋事",
+      "tags": ["scary", "crowd"], "area": "park", "radius": 4.0,
+      "interval_min": 1000000000, "interval_max": 1000000000,
+      "valence": -0.8, "intensity": 0.75,
+      "behavior_mults": {"park": 0.4, "outdoor": 0.7},
+      "immune_behavior_tags": []
+    },
+    {
+      "id": "park_concert", "name": "公园音乐会",
+      "tags": ["music", "crowd"], "area": "park", "radius": 4.0,
+      "interval_min": 1000000000, "interval_max": 1000000000,
+      "valence": 0.8, "intensity": 0.6,
+      "behavior_mults": {"park": 1.6},
+      "immune_behavior_tags": []
+    }
+  ]
+}"#.to_string()
+}
+
+fn m3_world(seed: u64, humans: usize) -> World {
+    let cfg = load_config(&m3_config()).unwrap();
+    let roster = living_core::human_names(humans)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    let mut w = World::new(cfg, seed, roster, false);
+    w.log_meta(seed, 0);
+    w
+}
+
+/// 公园行为的执行次数（逛公园 + 长椅小坐）。
+fn park_execs(w: &World) -> u64 {
+    w.agents
+        .iter()
+        .map(|a| {
+            a.exec_counts.get("walk_park").copied().unwrap_or(0)
+                + a.exec_counts.get("bench_sit").copied().unwrap_or(0)
+        })
+        .sum()
+}
+
+/// M3 验收：公园声誉下降和恢复的完整循环可以复现。
+/// 基线（无事件）→ 公园连续滋事 → 声誉跌落、到访减少 → 事件停止 →
+/// 到访体验把声誉拉回、到访回升。衰退与恢复由同一套统计机制产生。
+#[test]
+fn m3_acceptance_park_reputation_cycle() {
+    let mut w = m3_world(11, 6);
+    // 基线：安定的两天。
+    w.run(2 * 1440);
+    let rep_base = w.area_states["park"].reputation;
+    let execs_base = park_execs(&w);
+    assert!(rep_base > 0.5, "基线声誉应处于高位：{rep_base}");
+    assert!(execs_base > 0, "居民应该会去公园");
+
+    // 冲击：公园连续三起滋事（受害者被固定在草坪上，确保直接受影响）。
+    let rowdy = 0; // env_events 下标
+    for _ in 0..3 {
+        w.run(360);
+        for id in [0u32, 1] {
+            w.agents[id as usize].current = None;
+            w.teleport(id, (5.0, 5.0));
+        }
+        w.trigger_env_event(rowdy, (5.0, 5.0));
+    }
+    let rep_low = w.area_states["park"].reputation;
+    println!("[M3 验收] 声誉：基线 {rep_base:.2} → 冲击后 {rep_low:.2}");
+    assert!(
+        rep_low < rep_base - 0.15,
+        "连续滋事应显著压低公园声誉：{rep_base:.2} -> {rep_low:.2}"
+    );
+
+    // 事件停止后的第二天：到访量应显著少于基线（记忆抑制 + 声誉乘数双通道）。
+    let execs_after_shock_start = park_execs(&w);
+    w.run(1440);
+    let execs_shock_day = park_execs(&w) - execs_after_shock_start;
+    let baseline_per_day = execs_base as f64 / 2.0;
+    println!("[M3 验收] 公园到访：基线 {baseline_per_day:.0}/天 → 事件后 {execs_shock_day}/天");
+    assert!(
+        (execs_shock_day as f64) < baseline_per_day * 0.6,
+        "声誉低谷期到访应明显减少：{execs_shock_day} vs {baseline_per_day:.0}"
+    );
+
+    // 恢复：连续四天无事发生（外加一场音乐会），口碑被良好的到访体验拉回。
+    let concert = 1;
+    w.run(720);
+    w.trigger_env_event(concert, (5.0, 5.0));
+    w.run(4 * 1440);
+    let rep_end = w.area_states["park"].reputation;
+    let execs_end = park_execs(&w);
+    let recovery_per_day = (execs_end - execs_shock_day - execs_after_shock_start) as f64 / 4.0;
+    println!("[M3 验收] 恢复期：声誉 {rep_low:.2} → {rep_end:.2}，到访 {recovery_per_day:.1}/天");
+    assert!(
+        rep_end > rep_low + 0.15,
+        "平静与良好体验应恢复声誉：{rep_low:.2} -> {rep_end:.2}"
+    );
+    assert!(
+        recovery_per_day > execs_shock_day as f64,
+        "声誉恢复后到访应回升：{recovery_per_day:.1} vs {execs_shock_day}"
+    );
+}
+
+/// 昼夜：夜间睡觉可用、白天公园行为可用（时间门双向起作用）。
+#[test]
+fn day_night_gates_flip_behavior_availability() {
+    let mut w = m3_world(3, 2);
+    // 跑到深夜 23:00。
+    while living_core::time::hour_of(w.tick) != 23 {
+        w.tick();
+    }
+    let night_opts = w.debug_options(0);
+    assert!(
+        night_opts.iter().any(|o| o.behavior == "sleep_home"),
+        "夜间应可睡觉"
+    );
+    assert!(
+        !night_opts.iter().any(|o| o.behavior == "walk_park"),
+        "夜间不该逛公园"
+    );
+    // 跑到白天 10:00。
+    while living_core::time::hour_of(w.tick) != 10 {
+        w.tick();
+    }
+    let day_opts = w.debug_options(0);
+    assert!(
+        day_opts.iter().any(|o| o.behavior == "walk_park"),
+        "白天应可逛公园"
+    );
+}
+
+/// 地点声誉反馈进行为权重：声誉跌落 → 公园行为的地点乘数变小。
+#[test]
+fn reputation_feeds_back_into_behavior_weights() {
+    let mut w = m3_world(3, 1);
+    w.run(600);
+    let before = w
+        .debug_options(0)
+        .iter()
+        .find(|o| o.behavior == "walk_park")
+        .unwrap()
+        .area_mult;
+    w.area_states.get_mut("park").unwrap().experience(-1.0, 1.0); // 声誉打到谷底
+    let after = w
+        .debug_options(0)
+        .iter()
+        .find(|o| o.behavior == "walk_park")
+        .unwrap()
+        .area_mult;
+    println!("[M3] 公园行为地点乘数：声誉好 {before:.2} → 声誉差 {after:.2}");
+    assert!(
+        after < before * 0.6,
+        "声誉差应压制公园行为：{before:.2} -> {after:.2}"
+    );
+}
+
+/// 时间窗事件不在窗内时顺延到下一个窗口起点（夜间施工白天不发生）。
+#[test]
+fn time_windowed_event_reschedules() {
+    let cfg = load_config(&m3_config_with_noise()).unwrap();
+    let mut w = World::new(cfg, 5, cat_roster(cat_names(1)), false);
+    // 跑到中午 12:00（世界从午夜起算，先离开夜间窗口）。
+    w.run(720);
+    // 把夜间施工排到当前拍——白天不在窗内，应顺延到今晚 22:00。
+    w.schedule_event_at(0, w.tick + 1);
+    w.run(3);
+    let next = w.event_next_at(0);
+    let hour = living_core::time::hour_of(next);
+    assert_eq!(hour, 22, "夜间事件应顺延到 22 点：下一拍 {next}");
+}
+
+fn m3_config_with_noise() -> String {
+    m3_config().replace(
+        r#""id": "park_rowdy", "name": "公园醉汉滋事",
+      "tags": ["scary", "crowd"], "area": "park", "radius": 4.0,
+      "interval_min": 1000000000, "interval_max": 1000000000,"#,
+        r#""id": "night_work", "name": "夜间施工",
+      "tags": ["noise"], "area": "home", "radius": 4.0,
+      "from_hour": 22, "to_hour": 6,
+      "interval_min": 1000000000, "interval_max": 1000000000,"#,
+    )
+}
+
+/// 多物种：人类和猫用不同的树（street 内容冒烟）。
+#[test]
+fn species_use_different_trees() {
+    let json = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../assets/street.json"
+    ))
+    .expect("需要 assets/street.json");
+    let cfg = load_config(&json).unwrap();
+    let mut roster: Vec<(String, String)> = living_core::human_names(2)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    roster.extend(cat_roster(cat_names(2)));
+    let mut w = World::new(cfg, 7, roster, true);
+    w.run(2000);
+    // 人类执行过人类行为，猫执行过猫行为，且互不串树。
+    let human_behaviors: Vec<&String> = w.agents[0].exec_counts.keys().collect();
+    let cat_behaviors: Vec<&String> = w.agents[2].exec_counts.keys().collect();
+    assert!(human_behaviors
+        .iter()
+        .any(|b| b.as_str() == "walk_park" || b.as_str() == "watch_tv"));
+    assert!(cat_behaviors
+        .iter()
+        .any(|b| b.as_str() == "play_tree" || b.as_str() == "sleep_cat"));
+    assert!(
+        !human_behaviors.iter().any(|b| b.as_str() == "play_tree"),
+        "人类不执行猫行为"
+    );
+    assert!(
+        !cat_behaviors.iter().any(|b| b.as_str() == "watch_tv"),
+        "猫不执行人类行为"
     );
 }

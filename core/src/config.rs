@@ -13,9 +13,88 @@ pub struct SimConfig {
     pub critical_need: f64,
     pub params: Params,
     pub behaviors: Vec<BehaviorDef>,
+    /// 默认行为树（单物种配置用；多物种配置用 trees 按物种选择）。
     pub tree: TreeNode,
+    /// 物种 → 行为树（M3：人类与猫同街生活）。空 = 全部用默认树。
+    #[serde(default)]
+    pub trees: BTreeMap<String, TreeNode>,
     pub spots: Vec<SpotDef>,
+    /// 地点（M3）：区域定义——街道地图上的矩形，声誉与整洁度的载体。
+    #[serde(default)]
+    pub areas: Vec<AreaDef>,
     pub env_events: Vec<EnvEventDef>,
+}
+
+impl SimConfig {
+    /// 物种对应的行为树：优先 trees[species]，否则默认树。
+    pub fn tree_for(&self, species: &str) -> &TreeNode {
+        self.trees.get(species).unwrap_or(&self.tree)
+    }
+
+    /// 物种用到的行为 ID 集合（树叶遍历；权重表只装这些）。
+    pub fn species_behaviors(&self, species: &str) -> Vec<(String, f64)> {
+        let mut ids: Vec<String> = Vec::new();
+        collect_actions(self.tree_for(species), &mut ids);
+        self.behaviors
+            .iter()
+            .filter(|b| ids.contains(&b.id))
+            .map(|b| (b.id.clone(), b.base_weight))
+            .collect()
+    }
+}
+
+fn collect_actions(node: &TreeNode, out: &mut Vec<String>) {
+    match node {
+        TreeNode::Selector { children } => {
+            for c in children {
+                collect_actions(c, out);
+            }
+        }
+        TreeNode::Gate { child, .. } | TreeNode::TimeGate { child, .. } => {
+            collect_actions(child, out)
+        }
+        TreeNode::Action { behavior } => {
+            if !out.contains(behavior) {
+                out.push(behavior.clone());
+            }
+        }
+    }
+}
+
+/// 地点（区域）：街道地图上的矩形。承载声誉（访客情绪累计）与整洁度（客观状态）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct AreaDef {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 区域矩形（米）：左下角与宽高。事件位置采样与"行为发生在哪个地点"判定。
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    /// 初始声誉（0..1）：1 = 口碑很好。
+    #[serde(default = "d_one")]
+    pub reputation: f64,
+    /// 初始整洁度（0..1）：1 = 干净。
+    #[serde(default = "d_one")]
+    pub cleanliness: f64,
+    /// 脏乱系数：公共场所到访留脏（1.0），自家用场所磨损极小（如 0.1）。
+    #[serde(default = "d_one")]
+    pub litter_scale: f64,
+}
+
+impl AreaDef {
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.id)
+    }
+
+    pub fn contains(&self, pos: (f64, f64)) -> bool {
+        pos.0 >= self.x && pos.0 <= self.x + self.w && pos.1 >= self.y && pos.1 <= self.y + self.h
+    }
+}
+
+fn d_one() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,11 +115,6 @@ pub struct Params {
     pub memory_top_k: usize,
     /// 初始权重的个体抖动范围（±比例）。
     pub weight_jitter: f64,
-    /// 房间尺寸（米）：事件位置采样与坐标边界。
-    #[serde(default = "d_room")]
-    pub room_width: f64,
-    #[serde(default = "d_room")]
-    pub room_height: f64,
     /// 目睹半径（米）：同伴的显著反应在这个距离内可被看见（一间房内都能看见）。
     #[serde(default = "d_witness_radius")]
     pub witness_radius: f64,
@@ -74,6 +148,25 @@ pub struct Params {
     /// 同屋代理的初始熟悉度上限（U(0, 此值)）：同屋檐下有点眼熟，但算不上亲近。
     #[serde(default = "d_initial_bond_max")]
     pub initial_bond_max: f64,
+    /// 地图尺寸（米）：事件位置采样与坐标边界。
+    #[serde(default = "d_room", alias = "room_width")]
+    pub map_width: f64,
+    #[serde(default = "d_room", alias = "room_height")]
+    pub map_height: f64,
+    /// 地点声誉：访客体验进声誉统计的学习率（每次体验的 EMA 权重）。
+    #[serde(default = "d_area_exp_alpha")]
+    pub area_exp_alpha: f64,
+    /// 地点声誉对行为权重的反馈：声誉 0 时乘 area_mult_min，声誉 1 时再 + span。
+    #[serde(default = "d_area_mult_min")]
+    pub area_mult_min: f64,
+    #[serde(default = "d_area_mult_span")]
+    pub area_mult_span: f64,
+    /// 每次到访留下的脏乱（整洁度下降量）。
+    #[serde(default = "d_visit_litter")]
+    pub visit_litter: f64,
+    /// 整洁度每日恢复量（清洁服务）。
+    #[serde(default = "d_clean_daily")]
+    pub clean_daily: f64,
 }
 
 fn d_room() -> f64 {
@@ -108,6 +201,21 @@ fn d_bond_player_gain() -> f64 {
 }
 fn d_initial_bond_max() -> f64 {
     0.3
+}
+fn d_area_exp_alpha() -> f64 {
+    0.15
+}
+fn d_area_mult_min() -> f64 {
+    0.35
+}
+fn d_area_mult_span() -> f64 {
+    1.1
+}
+fn d_visit_litter() -> f64 {
+    0.004
+}
+fn d_clean_daily() -> f64 {
+    0.35
 }
 
 /// 行为注册表条目：树只引用行为 ID，引擎解释声明执行。
@@ -171,12 +279,18 @@ pub enum TreeNode {
         below: f64,
         child: Box<TreeNode>,
     },
+    /// 时间门（M3 昼夜）：只在 from..to 小时窗口内放行（含头不含尾；22→6 跨零点合法）。
+    TimeGate {
+        from: u32,
+        to: u32,
+        child: Box<TreeNode>,
+    },
     Action {
         behavior: String,
     },
 }
 
-/// 地点：房间内的位置，带特征标签供记忆匹配。M2 起有坐标（米）。
+/// 地点：地图上的位置，带特征标签供记忆匹配。M2 起有坐标（米），M3 起归属区域。
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpotDef {
     pub id: String,
@@ -186,6 +300,9 @@ pub struct SpotDef {
     pub x: f64,
     #[serde(default)]
     pub y: f64,
+    /// 所属区域（地点声誉的载体）；None = 不属于任何区域（如街道本身）。
+    #[serde(default)]
+    pub area: Option<String>,
 }
 
 /// 环境事件：按间隔随机发生，在发生位置的影响半径内写入目击代理的记忆。
@@ -201,9 +318,17 @@ pub struct EnvEventDef {
     /// 情绪效价（-1..1）与强度（0..1），参与显著性计算。
     pub valence: f64,
     pub intensity: f64,
-    /// 影响半径（米）；0 = 全房间（如阳光、零食时间这种全域事件）。
+    /// 影响半径（米）；0 = 全图（如阳光这种全域事件）。
     #[serde(default)]
     pub radius: f64,
+    /// 事件固定发生在该区域（位置在区域矩形内均匀采样）；None = 全图随机。
+    #[serde(default)]
+    pub area: Option<String>,
+    /// 时间窗（小时，含头不含尾，可跨零点）：不设 = 全天可发生。
+    #[serde(default)]
+    pub from_hour: Option<u32>,
+    #[serde(default)]
+    pub to_hour: Option<u32>,
     /// 对行为标签的权重乘数（如 {"hide": 5}）。
     #[serde(default)]
     pub behavior_mults: BTreeMap<String, f64>,
@@ -215,6 +340,14 @@ pub struct EnvEventDef {
 impl EnvEventDef {
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.id)
+    }
+
+    /// 事件是否在时间窗内（无窗口 = 恒真）。
+    pub fn in_window(&self, hour: u32) -> bool {
+        match (self.from_hour, self.to_hour) {
+            (Some(from), Some(to)) => crate::time::in_hour_window(hour, from, to),
+            _ => true,
+        }
     }
 }
 
@@ -228,6 +361,7 @@ pub fn load_config(json: &str) -> Result<SimConfig, String> {
 pub fn validate(cfg: &SimConfig) -> Result<(), String> {
     let behavior_ids: Vec<&str> = cfg.behaviors.iter().map(|b| b.id.as_str()).collect();
     let spots: Vec<&str> = cfg.spots.iter().map(|s| s.id.as_str()).collect();
+    let areas: Vec<&str> = cfg.areas.iter().map(|a| a.id.as_str()).collect();
     for b in &cfg.behaviors {
         if b.base_weight <= 0.0 {
             return Err(format!("行为 {} 的 base_weight 必须为正", b.id));
@@ -247,6 +381,24 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
         }
     }
     validate_tree(&cfg.tree, &behavior_ids)?;
+    for (species, tree) in &cfg.trees {
+        validate_tree(tree, &behavior_ids).map_err(|e| format!("物种 {species} 的树：{e}"))?;
+    }
+    for s in &cfg.spots {
+        if let Some(a) = &s.area {
+            if !areas.contains(&a.as_str()) {
+                return Err(format!("地点 {} 引用了未知区域 {}", s.id, a));
+            }
+        }
+    }
+    for a in &cfg.areas {
+        if a.reputation < 0.0 || a.reputation > 1.0 {
+            return Err(format!("区域 {} 初始声誉应在 0..1", a.id));
+        }
+        if a.w <= 0.0 || a.h <= 0.0 {
+            return Err(format!("区域 {} 的宽高应为正", a.id));
+        }
+    }
     for e in &cfg.env_events {
         if e.intensity < 0.0 || e.intensity > 1.0 {
             return Err(format!("事件 {} 强度应在 0..1", e.id));
@@ -256,6 +408,16 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
         }
         if e.radius < 0.0 {
             return Err(format!("事件 {} 半径不应为负", e.id));
+        }
+        if let Some(a) = &e.area {
+            if !areas.contains(&a.as_str()) {
+                return Err(format!("事件 {} 引用了未知区域 {}", e.id, a));
+            }
+        }
+        for h in [e.from_hour, e.to_hour].into_iter().flatten() {
+            if h > 23 {
+                return Err(format!("事件 {} 的小时窗口应在 0..24", e.id));
+            }
         }
     }
     Ok(())
@@ -269,7 +431,9 @@ fn validate_tree(node: &TreeNode, ids: &[&str]) -> Result<(), String> {
             }
             Ok(())
         }
-        TreeNode::Gate { child, .. } => validate_tree(child, ids),
+        TreeNode::Gate { child, .. } | TreeNode::TimeGate { child, .. } => {
+            validate_tree(child, ids)
+        }
         TreeNode::Action { behavior } => {
             if ids.contains(&behavior.as_str()) {
                 Ok(())

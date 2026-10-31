@@ -13,10 +13,17 @@ use std::collections::BTreeMap;
 pub const STREAM_DECISION: u8 = 0;
 pub const STREAM_INDIVIDUAL: u8 = 1;
 
+fn d_species_cat() -> String {
+    "cat".to_string()
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Agent {
     pub id: u32,
     pub name: String,
+    /// 物种（M3）：决定用哪棵行为树（人类/猫同街生活）。
+    #[serde(default = "d_species_cat")]
+    pub species: String,
     /// 玩家角色标记：只有玩家角色接受指令与消耗意志力。
     pub is_player: bool,
     /// softmax 温度（探索性人格）：高温度更爱尝试低权重行为。
@@ -47,6 +54,7 @@ impl Agent {
         world_seed: WorldSeed,
         id: u32,
         name: String,
+        species: String,
         behaviors: &[(String, f64)],
         params: &Params,
     ) -> Self {
@@ -62,6 +70,7 @@ impl Agent {
         Agent {
             id,
             name,
+            species,
             is_player: false,
             temperature,
             needs: Needs::full(),
@@ -71,7 +80,7 @@ impl Agent {
             base_weights,
             memory: MemoryTable::new(params.memory_cap, params.memory_top_k),
             current: None,
-            pos: (params.room_width / 2.0, params.room_height / 2.0),
+            pos: (params.map_width / 2.0, params.map_height / 2.0),
             next_heartbeat: rng_ind.uniform_int(1, params.heartbeat_max),
             exec_counts: BTreeMap::new(),
             rng_decision: Rng::seeded(derive_seed(world_seed, id, STREAM_DECISION)),
