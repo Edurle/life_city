@@ -1,0 +1,402 @@
+{
+  "needs": {
+    "hunger": 4.5,
+    "energy": 3.0,
+    "fun": 5.0,
+    "social": 3.0,
+    "hygiene": 2.0,
+    "bladder": 4.0
+  },
+  "critical_need": 15,
+  "params": {
+    "alpha": 0.06,
+    "habit_decay_hourly": 0.02,
+    "temperature_min": 0.7,
+    "temperature_max": 1.4,
+    "heartbeat_min": 5,
+    "heartbeat_max": 20,
+    "memory_cap": 500,
+    "memory_top_k": 8,
+    "weight_jitter": 0.1
+  },
+  "spots": [
+    {
+      "id": "bowl",
+      "tags": [
+        "food"
+      ]
+    },
+    {
+      "id": "bed",
+      "tags": [
+        "quiet",
+        "soft"
+      ]
+    },
+    {
+      "id": "windowsill",
+      "tags": [
+        "sun",
+        "view"
+      ]
+    },
+    {
+      "id": "cat_tree",
+      "tags": [
+        "play",
+        "high",
+        "view"
+      ]
+    },
+    {
+      "id": "box",
+      "tags": [
+        "hide",
+        "quiet"
+      ]
+    },
+    {
+      "id": "litter",
+      "tags": [
+        "toilet"
+      ]
+    },
+    {
+      "id": "sofa",
+      "tags": [
+        "soft",
+        "social"
+      ]
+    },
+    {
+      "id": "scratching_post",
+      "tags": [
+        "scratch"
+      ]
+    }
+  ],
+  "behaviors": [
+    {
+      "id": "eat",
+      "base_weight": 3.0,
+      "duration_min": 10,
+      "duration_max": 30,
+      "effects": {
+        "hunger": 50,
+        "energy": 5
+      },
+      "tags": [
+        "food"
+      ],
+      "spot": "bowl",
+      "gate_need": "hunger",
+      "gate_below": 70,
+      "name": "吃饭"
+    },
+    {
+      "id": "sleep",
+      "base_weight": 3.0,
+      "duration_min": 90,
+      "duration_max": 240,
+      "effects": {
+        "energy": 55
+      },
+      "tags": [
+        "sleep",
+        "quiet"
+      ],
+      "spot": "bed",
+      "gate_need": "energy",
+      "gate_below": 45,
+      "name": "睡大觉"
+    },
+    {
+      "id": "nap_windowsill",
+      "base_weight": 2.2,
+      "duration_min": 30,
+      "duration_max": 90,
+      "effects": {
+        "energy": 28,
+        "fun": 8
+      },
+      "tags": [
+        "sleep",
+        "sun"
+      ],
+      "spot": "windowsill",
+      "gate_need": "energy",
+      "gate_below": 70,
+      "name": "窗台打盹"
+    },
+    {
+      "id": "play_cat_tree",
+      "base_weight": 1.6,
+      "duration_min": 15,
+      "duration_max": 45,
+      "effects": {
+        "fun": 32,
+        "energy": -8
+      },
+      "tags": [
+        "play"
+      ],
+      "spot": "cat_tree",
+      "name": "爬猫爬架"
+    },
+    {
+      "id": "play_ball",
+      "base_weight": 1.4,
+      "duration_min": 10,
+      "duration_max": 30,
+      "effects": {
+        "fun": 26,
+        "energy": -6
+      },
+      "tags": [
+        "play"
+      ],
+      "name": "追小球"
+    },
+    {
+      "id": "groom",
+      "base_weight": 1.2,
+      "duration_min": 20,
+      "duration_max": 40,
+      "effects": {
+        "hygiene": 35
+      },
+      "tags": [
+        "groom"
+      ],
+      "gate_need": "hygiene",
+      "gate_below": 55,
+      "name": "舔毛"
+    },
+    {
+      "id": "cuddle_sofa",
+      "base_weight": 1.5,
+      "duration_min": 10,
+      "duration_max": 30,
+      "effects": {
+        "social": 32,
+        "fun": 5
+      },
+      "tags": [
+        "social"
+      ],
+      "spot": "sofa",
+      "gate_need": "social",
+      "gate_below": 60,
+      "name": "沙发蹭蹭"
+    },
+    {
+      "id": "hide_box",
+      "base_weight": 1.0,
+      "duration_min": 15,
+      "duration_max": 45,
+      "effects": {
+        "fun": 2
+      },
+      "tags": [
+        "hide",
+        "quiet"
+      ],
+      "spot": "box",
+      "name": "躲纸箱"
+    },
+    {
+      "id": "scratch",
+      "base_weight": 0.8,
+      "duration_min": 5,
+      "duration_max": 15,
+      "effects": {
+        "fun": 12
+      },
+      "tags": [
+        "scratch",
+        "play"
+      ],
+      "spot": "scratching_post",
+      "name": "磨爪子"
+    },
+    {
+      "id": "explore_room",
+      "base_weight": 1.0,
+      "duration_min": 10,
+      "duration_max": 30,
+      "effects": {
+        "fun": 10,
+        "energy": -4
+      },
+      "tags": [
+        "explore"
+      ],
+      "name": "巡逻房间"
+    },
+    {
+      "id": "litter",
+      "base_weight": 1.0,
+      "duration_min": 5,
+      "duration_max": 10,
+      "effects": {
+        "bladder": 65
+      },
+      "tags": [
+        "toilet"
+      ],
+      "spot": "litter",
+      "gate_need": "bladder",
+      "gate_below": 50,
+      "name": "上猫砂盆"
+    }
+  ],
+  "tree": {
+    "type": "selector",
+    "children": [
+      {
+        "type": "gate",
+        "need": "bladder",
+        "below": 45,
+        "child": {
+          "type": "action",
+          "behavior": "litter"
+        }
+      },
+      {
+        "type": "gate",
+        "need": "hunger",
+        "below": 70,
+        "child": {
+          "type": "action",
+          "behavior": "eat"
+        }
+      },
+      {
+        "type": "gate",
+        "need": "energy",
+        "below": 45,
+        "child": {
+          "type": "action",
+          "behavior": "sleep"
+        }
+      },
+      {
+        "type": "gate",
+        "need": "hygiene",
+        "below": 55,
+        "child": {
+          "type": "action",
+          "behavior": "groom"
+        }
+      },
+      {
+        "type": "gate",
+        "need": "social",
+        "below": 60,
+        "child": {
+          "type": "action",
+          "behavior": "cuddle_sofa"
+        }
+      },
+      {
+        "type": "gate",
+        "need": "energy",
+        "below": 70,
+        "child": {
+          "type": "action",
+          "behavior": "nap_windowsill"
+        }
+      },
+      {
+        "type": "action",
+        "behavior": "play_cat_tree"
+      },
+      {
+        "type": "action",
+        "behavior": "play_ball"
+      },
+      {
+        "type": "action",
+        "behavior": "scratch"
+      },
+      {
+        "type": "action",
+        "behavior": "hide_box"
+      },
+      {
+        "type": "action",
+        "behavior": "explore_room"
+      }
+    ]
+  },
+  "env_events": [
+    {
+      "id": "vacuum_cleaner",
+      "tags": [
+        "noise"
+      ],
+      "interval_min": 1440,
+      "interval_max": 2880,
+      "valence": -0.9,
+      "intensity": 0.85,
+      "behavior_mults": {
+        "hide": 5.0,
+        "explore": 0.3,
+        "play": 0.4,
+        "sleep": 0.5
+      },
+      "immune_behavior_tags": [
+        "hide"
+      ]
+    },
+    {
+      "id": "treat_time",
+      "tags": [
+        "food",
+        "social"
+      ],
+      "interval_min": 480,
+      "interval_max": 960,
+      "valence": 0.8,
+      "intensity": 0.6,
+      "behavior_mults": {
+        "food": 3.0,
+        "social": 2.0
+      },
+      "immune_behavior_tags": []
+    },
+    {
+      "id": "sun_burst",
+      "tags": [
+        "sun"
+      ],
+      "interval_min": 300,
+      "interval_max": 800,
+      "valence": 0.6,
+      "intensity": 0.5,
+      "behavior_mults": {
+        "sun": 2.5,
+        "sleep": 1.3
+      },
+      "immune_behavior_tags": []
+    },
+    {
+      "id": "stranger_visit",
+      "tags": [
+        "stranger"
+      ],
+      "interval_min": 600,
+      "interval_max": 1440,
+      "valence": -0.5,
+      "intensity": 0.5,
+      "behavior_mults": {
+        "hide": 3.0,
+        "social": 0.5,
+        "explore": 0.6
+      },
+      "immune_behavior_tags": [
+        "hide"
+      ]
+    }
+  ]
+}

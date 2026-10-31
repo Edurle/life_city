@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>《活城》M0 日志回放查看器</title>
+<style>
+  :root { --bg:#1b1e24; --panel:#242830; --line:#3a3f4b; --text:#d8dce4; --dim:#8a91a0; --accent:#7aa2f7; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "PingFang SC","Microsoft YaHei",sans-serif; }
+  header { padding:10px 16px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0; color:var(--accent); }
+  #drop { border:1px dashed var(--dim); border-radius:6px; padding:6px 14px; color:var(--dim); }
+  #drop.ok { border-color:var(--accent); color:var(--accent); }
+  #meta { color:var(--dim); font-size:12px; }
+  main { padding:12px 16px; }
+  #tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+  .tab { padding:4px 12px; border:1px solid var(--line); border-radius:14px; cursor:pointer; background:var(--panel); }
+  .tab.active { border-color:var(--accent); color:var(--accent); }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:stretch; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:12px; }
+  .card h3 { margin:0 0 8px; font-size:13px; color:var(--dim); font-weight:normal; }
+  canvas { background:#16181d; border-radius:6px; }
+  .legend { display:flex; gap:10px; flex-wrap:wrap; font-size:12px; margin-top:6px; }
+  .legend span { display:inline-flex; align-items:center; gap:4px; }
+  .sw { width:10px; height:10px; border-radius:2px; display:inline-block; }
+  #scrub { width:100%; accent-color:var(--accent); }
+  #readout { display:flex; gap:18px; flex-wrap:wrap; font-size:13px; }
+  #readout b { color:var(--accent); font-weight:normal; }
+  table { border-collapse:collapse; width:100%; font-size:12.5px; }
+  th,td { text-align:left; padding:3px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:normal; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .pos { color:#9ece6a; } .neg { color:#f7768e; }
+  #memlist div { padding:3px 0; border-bottom:1px solid var(--line); font-size:12.5px; }
+  .hint { color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>《活城》M0 · 日志回放查看器</h1>
+  <label id="drop">拖入 .jsonl 日志文件，或点击选择<input id="file" type="file" accept=".jsonl" hidden></label>
+  <span id="meta"></span>
+</header>
+<main id="main"><p class="hint">等待日志文件。运行 <code>cargo run -p living-cli -- --out logs/demo.jsonl</code> 生成日志后拖入。</p></main>
+
+<script>
+"use strict";
+const COLORS = ["#7aa2f7","#9ece6a","#e0af68","#f7768e","#bb9af7","#7dcfff","#ff9e64","#73daca","#c0caf5","#db4b4b","#ff757f","#2ac3de"];
+const NEED_LABELS = {hunger:"饥饿",energy:"精力",fun:"娱乐",social:"社交",hygiene:"卫生",bladder:"如厕"};
+const QUARTERS = ["凌晨","上午","下午","夜晚"];
+
+let DATA = null;   // {agents:Map, envEvents:[], meta}
+let selected = 0;
+let scrubIdx = 0;
+
+// ---------- 解析 ----------
+function parseLog(text) {
+  const agents = new Map();
+  const envEvents = [];
+  let meta = null;
+  const lines = text.split("\n");
+  for (const line of lines) {
+    const s = line.trim();
+    if (!s) continue;
+    let ev; try { ev = JSON.parse(s); } catch { continue; }
+    if (ev.t === "meta") { meta = ev; continue; }
+    if (ev.t === "env_event") { envEvents.push(ev); continue; }
+    if (ev.t === "snapshot") {
+      A(agents, ev.agent).snapshots.push(ev); continue;
+    }
+    if (ev.t === "decision") { A(agents, ev.agent).decisions.push(ev); continue; }
+    if (ev.t === "player_command") { A(agents, ev.agent).commands.push(ev); continue; }
+    if (ev.t === "memory_write") { A(agents, ev.agent).memWrites.push(ev); continue; }
+    if (ev.t === "summary") {
+      for (const s2 of ev.agents) { A(agents, s2.id).summary = s2; }
+      continue;
+    }
+  }
+  for (const a of agents.values()) {
+    a.snapshots.sort((x,y)=>x.tick-y.tick);
+    a.decisions.sort((x,y)=>x.tick-y.tick);
+  }
+  return {agents, envEvents, meta};
+}
+function A(agents, id) {
+  if (!agents.has(id)) agents.set(id, {id, snapshots:[], decisions:[], commands:[], memWrites:[], summary:null});
+  return agents.get(id);
+}
+function fmtTick(t) { const d=Math.floor(t/1440)+1,h=Math.floor(t%1440/60),m=t%60; return `第${d}天 ${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`; }
+
+// ---------- 画图 ----------
+function lineChart(canvas, seriesList, opts) {
+  // seriesList: [{name,color,data:[number|null]...}]
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+  const pad = {l:34,r:8,t:8,b:18};
+  const maxY = Math.max(opts.maxY ?? 1, ...seriesList.flatMap(s=>s.data.filter(v=>v!=null)));
+  const n = Math.max(1, ...seriesList.map(s=>s.data.length));
+  const x = i => pad.l + (W-pad.l-pad.r) * (n===1?0:i/(n-1));
+  const y = v => H-pad.b - (H-pad.t-pad.b) * (v/maxY);
+  ctx.strokeStyle = "#2a2e37"; ctx.fillStyle = "#8a91a0"; ctx.font = "10px sans-serif";
+  for (let g=0; g<=4; g++) {
+    const gy = pad.t + (H-pad.t-pad.b)*g/4;
+    ctx.beginPath(); ctx.moveTo(pad.l,gy); ctx.lineTo(W-pad.r,gy); ctx.stroke();
+    ctx.fillText(String(Math.round(maxY*(1-g/4))), 4, gy+3);
+  }
+  for (const s of seriesList) {
+    ctx.strokeStyle = s.color; ctx.lineWidth = 1.4; ctx.beginPath();
+    let started = false;
+    s.data.forEach((v,i)=>{ if(v==null){started=false;return;} const X=x(i),Y=y(v); if(!started){ctx.moveTo(X,Y);started=true;} else ctx.lineTo(X,Y); });
+    ctx.stroke();
+  }
+  if (opts.marker != null) { // 时间轴游标
+    ctx.strokeStyle = "#e0af68"; ctx.lineWidth = 1; ctx.setLineDash([4,3]);
+    ctx.beginPath(); ctx.moveTo(x(opts.marker), pad.t); ctx.lineTo(x(opts.marker), H-pad.b); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
+// ---------- 渲染 ----------
+function render() {
+  const main = document.getElementById("main");
+  if (!DATA) return;
+  const ids = [...DATA.agents.keys()].sort((a,b)=>a-b);
+  const ag = DATA.agents.get(selected);
+  const name = ag.summary ? ag.summary.name : ("猫#"+selected);
+
+  let html = `<div id="tabs">` + ids.map(id => {
+    const a = DATA.agents.get(id);
+    const nm = a.summary ? a.summary.name : ("猫#"+id);
+    return `<div class="tab ${id===selected?'active':''}" data-id="${id}">${nm}</div>`;
+  }).join("") + `</div>`;
+
+  html += `
+  <div class="card">
+    <h3>时间轴（每小时一个快照，拖动游标查看任意时刻状态）</h3>
+    <input id="scrub" type="range" min="0" max="${Math.max(0,ag.snapshots.length-1)}" value="${scrubIdx}">
+    <div id="readout"></div>
+  </div>
+  <div class="row">
+    <div class="card" style="flex:1;min-width:420px"><h3>六项需求</h3><canvas id="needsC" width="620" height="220"></canvas>
+      <div class="legend">${Object.keys(NEED_LABELS).map((k,i)=>`<span><i class="sw" style="background:${COLORS[i]}"></i>${NEED_LABELS[k]}</span>`).join("")}</div></div>
+    <div class="card" style="flex:1;min-width:420px"><h3>行为权重（含习惯累积，随经历漂移）</h3><canvas id="weightsC" width="620" height="220"></canvas><div class="legend" id="wLegend"></div></div>
+  </div>
+  <div class="row">
+    <div class="card" style="flex:1;min-width:360px"><h3>行为占比（全部决策）</h3><canvas id="distC" width="620" height="240"></canvas></div>
+    <div class="card" style="flex:1;min-width:360px"><h3>记忆写入（按显著性排序）</h3><div id="memlist"></div></div>
+  </div>
+  <div class="card"><h3>决策流水与因素分解（最近 60 次决策 · 权重 = 代理权重 × 需求 × 记忆）</h3><div id="decTable"></div></div>`;
+  main.innerHTML = html;
+
+  document.querySelectorAll(".tab").forEach(t => t.onclick = () => { selected = +t.dataset.id; scrubIdx = 0; render(); });
+  const scrub = document.getElementById("scrub");
+  scrub.oninput = () => { scrubIdx = +scrub.value; updateReadout(); drawCharts(ag); };
+
+  drawCharts(ag);
+  updateReadout();
+  renderDist(ag);
+  renderMems(ag);
+  renderDecisions(ag);
+}
+
+function updateReadout() {
+  const ag = DATA.agents.get(selected);
+  const snap = ag.snapshots[scrubIdx];
+  const el = document.getElementById("readout");
+  if (!snap) { el.innerHTML = "<span class='hint'>无快照</span>"; return; }
+  const needs = Object.entries(snap.needs).map(([k,v]) => `${NEED_LABELS[k]} ${v.toFixed(0)}`).join(" · ");
+  const will = snap.willpower != null ? ` · 意志 ${snap.willpower.toFixed(0)}` : "";
+  el.innerHTML = `<span><b>${fmtTick(snap.tick)}</b></span><span>${needs}${will}</span><span>记忆 ${snap.memories} 条</span>`;
+}
+
+function drawCharts(ag) {
+  // 需求曲线（意志力若存在则一并画出，黄色虚线色）
+  const needKeys = Object.keys(NEED_LABELS);
+  const hasWill = ag.snapshots.some(s => s.willpower != null);
+  const series = needKeys.map((k,i)=>({name:k,color:COLORS[i],data:ag.snapshots.map(s=>s.needs[k])}));
+  if (hasWill) series.push({name:"willpower",color:"#e0af68",data:ag.snapshots.map(s=>s.willpower)});
+  lineChart(document.getElementById("needsC"), series, {maxY:100, marker:scrubIdx});
+  document.querySelector("#needsC").closest(".card").querySelector(".legend").innerHTML =
+    needKeys.map((k,i)=>`<span><i class="sw" style="background:${COLORS[i]}"></i>${NEED_LABELS[k]}</span>`).join("") +
+    (hasWill ? `<span><i class="sw" style="background:#e0af68"></i>意志力</span>` : "");
+  // 权重曲线（取均值最高的前 8 个行为）
+  const keys = [...new Set(ag.snapshots.flatMap(s=>Object.keys(s.weights)))]
+    .map(k => ({k, avg: ag.snapshots.reduce((u,s)=>u+(s.weights[k]||0),0)/ag.snapshots.length}))
+    .sort((a,b)=>b.avg-a.avg).slice(0,8).map(o=>o.k);
+  lineChart(document.getElementById("weightsC"),
+    keys.map((k,i)=>({name:k,color:COLORS[i%COLORS.length],data:ag.snapshots.map(s=>s.weights[k]??null)})),
+    {marker:scrubIdx});
+  document.getElementById("wLegend").innerHTML = keys.map((k,i)=>`<span><i class="sw" style="background:${COLORS[i%COLORS.length]}"></i>${k}</span>`).join("");
+}
+
+function renderDist(ag) {
+  const counts = {};
+  for (const d of ag.decisions) counts[d.choice] = (counts[d.choice]||0)+1;
+  const total = ag.decisions.length || 1;
+  const entries = Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+  const c = document.getElementById("distC"), ctx = c.getContext("2d");
+  ctx.clearRect(0,0,c.width,c.height);
+  const bw = Math.min(46, (c.width-20)/Math.max(entries.length,1) - 8), max = entries[0]?.[1]||1;
+  entries.forEach(([k,v],i)=>{
+    const x = 14 + i*(bw+10), h = (c.height-46) * v/max;
+    ctx.fillStyle = COLORS[i%COLORS.length];
+    ctx.fillRect(x, c.height-30-h, bw, h);
+    ctx.fillStyle = "#d8dce4"; ctx.font = "11px sans-serif"; ctx.textAlign = "center";
+    ctx.save(); ctx.translate(x+bw/2, c.height-24); ctx.rotate(-0.5); ctx.fillText(k, 0, 0); ctx.restore();
+    ctx.fillText((100*v/total).toFixed(0)+"%", x+bw/2, c.height-34-h);
+  });
+}
+
+function renderMems(ag) {
+  const el = document.getElementById("memlist");
+  const sorted = [...ag.memWrites].sort((a,b)=>b.salience-a.salience).slice(0,20);
+  el.innerHTML = sorted.length ? sorted.map(m=>{
+    const mults = Object.entries(m.mults||{}).map(([k,v])=>`<span class="${v>1?'pos':'neg'}">${k}×${v}</span>`).join(" ");
+    return `<div>${fmtTick(m.tick)} · <b>${m.event}</b> · 显著性 ${m.salience.toFixed(2)} · ${mults}</div>`;
+  }).join("") : "<p class='hint'>本代理没有记忆写入。</p>";
+}
+
+function renderDecisions(ag) {
+  const el = document.getElementById("decTable");
+  // 玩家指令与自动决策合并按时间排列，最近的 60 条。
+  const items = [
+    ...ag.decisions.map(d => ({tick:d.tick, isCmd:false, choice:d.choice, f:d.factors, accepted:true, cost:null})),
+    ...ag.commands.map(c => ({tick:c.tick, isCmd:true, choice:c.behavior, f:null, accepted:c.accepted, cost:c.cost})),
+  ].sort((a,b)=>a.tick-b.tick).slice(-60).reverse();
+  const rows = items.map(d=>{
+    if (d.isCmd) {
+      return `<tr><td>${fmtTick(d.tick)}</td><td>▶ ${d.choice}</td><td class="num">—</td><td class="num">—</td><td class="num">⚡${d.cost.toFixed(0)}</td>
+        <td class="${d.accepted?'pos':'neg'}">${d.accepted?'已执行':'被拒绝'}</td></tr>`;
+    }
+    const f = d.f;
+    return `<tr><td>${fmtTick(d.tick)}</td><td>${d.choice}</td>
+      <td class="num">${f.weight.toFixed(2)}</td>
+      <td class="num">${f.need_mult.toFixed(2)}</td>
+      <td class="num ${f.mem_mult>1.05?'pos':f.mem_mult<0.95?'neg':''}">${f.mem_mult.toFixed(2)}</td>
+      <td>${f.forced ? "生理反射" : f.will_command ? "玩家指令" : "概率"}</td></tr>`;
+  }).join("");
+  el.innerHTML = `<table><tr><th>时间</th><th>行为</th><th>代理权重</th><th>需求乘数</th><th>记忆/⚡</th><th>来源</th></tr>${rows}</table>`;
+}
+
+// ---------- 载入 ----------
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    DATA = parseLog(reader.result);
+    selected = 0; scrubIdx = 0;
+    const ids = [...DATA.agents.keys()];
+    if (!ids.length) { alert("日志里没有找到代理数据"); return; }
+    const m = DATA.meta;
+    document.getElementById("meta").textContent =
+      m ? `种子 ${m.seed} · ${m.agents} 只 · ${(m.ticks/1440).toFixed(1)} 天` : "";
+    document.getElementById("drop").classList.add("ok");
+    render();
+  };
+  reader.readAsText(file);
+}
+const drop = document.getElementById("drop"), fileInput = document.getElementById("file");
+drop.onclick = () => fileInput.click();
+fileInput.onchange = () => { if (fileInput.files[0]) loadFile(fileInput.files[0]); };
+document.addEventListener("dragover", e => e.preventDefault());
+document.addEventListener("drop", e => { e.preventDefault(); if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
+// URL 参数直接加载日志：viewer/index.html?log=/logs/demo.jsonl（需经 HTTP 提供）
+(function () {
+  const p = new URLSearchParams(location.search).get("log");
+  if (!p) return;
+  fetch(p).then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
+    .then(t => { const f = new File([t], p, {type:"text/plain"}); loadFile(f); })
+    .catch(e => { document.getElementById("main").innerHTML = `<p class="hint">加载 ${p} 失败：${e}</p>`; });
+})();
+</script>
+</body>
+</html>

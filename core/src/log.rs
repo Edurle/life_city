@@ -1,0 +1,130 @@
+//! JSONL 事件日志：模拟的唯一事实源。
+//! 每行一个 JSON 对象，serde 派生序列化；BTreeMap 保证键序确定，日志字节级可比较。
+
+use crate::needs::Needs;
+use serde::Serialize;
+use std::collections::BTreeMap;
+
+pub const LOG_VERSION: u32 = 1;
+
+/// 决策的因素分解：系统能"报告原因"的载体。
+#[derive(Debug, Clone, Serialize)]
+pub struct FactorBreakdown {
+    /// 行为注册表基准权重。
+    pub base: f64,
+    /// 代理当前权重（含习惯累积与个体抖动）。
+    pub weight: f64,
+    /// 需求紧迫度乘数。
+    pub need_mult: f64,
+    /// 情境记忆乘数。
+    pub mem_mult: f64,
+    /// 第一层生理反射强制执行。
+    pub forced: bool,
+    /// 玩家意志指令覆盖（M1 意志节点）。
+    pub will_command: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum LogEvent {
+    Meta {
+        version: u32,
+        seed: u64,
+        agents: usize,
+        ticks: u64,
+    },
+    EnvEvent {
+        tick: u64,
+        event: String,
+    },
+    Decision {
+        tick: u64,
+        agent: u32,
+        choice: String,
+        factors: FactorBreakdown,
+        temperature: f64,
+    },
+    ActionStart {
+        tick: u64,
+        agent: u32,
+        behavior: String,
+        until: u64,
+    },
+    ActionEnd {
+        tick: u64,
+        agent: u32,
+        behavior: String,
+    },
+    MemoryWrite {
+        tick: u64,
+        agent: u32,
+        event: String,
+        salience: f64,
+        mults: BTreeMap<String, f64>,
+    },
+    /// 周期性状态快照（每小时）：查看器只凭日志即可重建任意时刻状态。
+    Snapshot {
+        tick: u64,
+        agent: u32,
+        needs: Needs,
+        weights: BTreeMap<String, f64>,
+        memories: usize,
+        willpower: f64,
+    },
+    /// 玩家指令（意志节点）：先入日志再由核心下一拍处理，回放包含玩家操作。
+    PlayerCommand {
+        tick: u64,
+        agent: u32,
+        behavior: String,
+        cost: f64,
+        accepted: bool,
+        reason: String,
+    },
+    Summary {
+        agents: Vec<AgentSummary>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentSummary {
+    pub id: u32,
+    pub name: String,
+    pub temperature: f64,
+    /// 行为执行占比（键序确定）。
+    pub distribution: BTreeMap<String, f64>,
+    /// 与 0 号代理行为分布的总变差距离（0 相同，1 完全不同）。
+    pub tv_distance_to_first: f64,
+    /// 记忆条数与最强烈的三条记忆（"报告原因"的摘要）。
+    pub memory_count: usize,
+    pub top_memories: Vec<String>,
+}
+
+/// 日志收集器：开发与常规运行写入内存最后落盘；基准模式关闭以测纯模拟性能。
+#[derive(Debug, Default)]
+pub struct Logger {
+    pub enabled: bool,
+    pub buf: String,
+}
+
+impl Logger {
+    pub fn new(enabled: bool) -> Self {
+        Logger {
+            enabled,
+            buf: String::new(),
+        }
+    }
+
+    pub fn log(&mut self, ev: &LogEvent) {
+        if !self.enabled {
+            return;
+        }
+        if let Ok(line) = serde_json::to_string(ev) {
+            self.buf.push_str(&line);
+            self.buf.push('\n');
+        }
+    }
+
+    pub fn write_to_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::write(path, &self.buf)
+    }
+}

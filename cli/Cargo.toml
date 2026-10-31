@@ -1,0 +1,15 @@
+[package]
+name = "living-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+living-core = { path = "../core" }
+
+[[bin]]
+name = "living-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "living-play"
+path = "src/bin/play.rs"
