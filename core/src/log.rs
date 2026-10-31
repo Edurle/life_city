@@ -5,7 +5,7 @@ use crate::needs::Needs;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const LOG_VERSION: u32 = 3;
+pub const LOG_VERSION: u32 = 4;
 
 /// 决策的因素分解：系统能"报告原因"的载体。
 #[derive(Debug, Clone, Serialize)]
@@ -26,6 +26,9 @@ pub struct FactorBreakdown {
     pub forced: bool,
     /// 玩家意志指令覆盖（M1 意志节点）。
     pub will_command: bool,
+    /// 习惯自动化（M4，设计稿 4.4）：选中行为权重已达自动化阈值——
+    /// 重复行为不需要意志参与的"第二天性"。
+    pub habit_auto: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +100,9 @@ pub enum LogEvent {
         weights: BTreeMap<String, f64>,
         memories: usize,
         willpower: f64,
+        /// LOD 层级（M4）：0 完整 / 1 常规 / 2 背景。
+        #[serde(default)]
+        lod: u8,
     },
     /// 玩家指令（意志节点）：先入日志再由核心下一拍处理，回放包含玩家操作。
     PlayerCommand {
@@ -122,6 +128,49 @@ pub enum LogEvent {
         reputation: f64,
         cleanliness: f64,
         visits: u64,
+    },
+    /// 暴露恢复（M4，设计稿 4.6）：完成被负面记忆抑制的行为，
+    /// 相关恐惧记忆消退了一点（反复低强度尝试 → 慢慢好起来）。
+    Exposure {
+        tick: u64,
+        agent: u32,
+        behavior: String,
+        /// 本次总消退量（鼓励在场时更大）。
+        faded: f64,
+    },
+    /// 设立限期目标（M4，设计稿 4.5）。
+    GoalSet {
+        tick: u64,
+        agent: u32,
+        behavior: String,
+        deadline: u64,
+    },
+    /// 为守约忍住了戒断行为（消耗意志力，换选次优行为）。
+    GoalResist {
+        tick: u64,
+        agent: u32,
+        behavior: String,
+        cost: f64,
+    },
+    /// 失守：行为树选中且没忍住（意志力不足），或玩家主动违约。
+    GoalViolation {
+        tick: u64,
+        agent: u32,
+        behavior: String,
+        /// true = 玩家主动下令违约；false = 意志力耗尽失守。
+        commanded: bool,
+    },
+    /// 目标结束：到期（成功 = 零违约）或中途放弃（习惯反弹）。
+    GoalEnd {
+        tick: u64,
+        agent: u32,
+        behavior: String,
+        success: bool,
+        abandoned: bool,
+        violations: u32,
+        resists: u32,
+        /// 放弃时还回的权重（反弹幅度）；到期成功时为 0（压制已转化为自然衰减）。
+        rebound: f64,
     },
     Summary {
         agents: Vec<AgentSummary>,

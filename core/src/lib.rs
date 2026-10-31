@@ -1,4 +1,5 @@
-//! living-core ——《活城》模拟核心（M3：一条街——人类角色、街道地图、昼夜、地点声誉）。
+//! living-core ——《活城》模拟核心（M4：玩家的人生——LOD 分层、习惯自动化、
+//! 负面记忆恢复、密友查看、限期目标）。
 //!
 //! 架构铁律（见《技术选型与架构》）：
 //! - 本库不含任何界面代码，只读配置、只写日志；
@@ -8,6 +9,7 @@
 pub mod agent;
 pub mod area;
 pub mod config;
+pub mod goal;
 pub mod log;
 pub mod memory;
 pub mod needs;
@@ -22,6 +24,7 @@ pub mod world;
 pub use agent::Agent;
 pub use area::AreaState;
 pub use config::{load_config, SimConfig};
+pub use goal::Goal;
 pub use log::{AgentSummary, LogEvent, Logger};
 pub use relation::Relations;
 pub use rng::WorldSeed;
@@ -29,5 +32,5 @@ pub use space::{Pos, SpatialGrid};
 pub use time::Tick;
 pub use world::{
     cat_names, cat_roster, human_names, tv_distance, BehaviorStatus, ChoiceInfo, CommandOutcome,
-    World,
+    FriendView, GoalStatus, HabitReport, World,
 };

@@ -11,16 +11,28 @@
 //! - 目睹者按"亲密值 × 模仿折扣"写入间接记忆（模仿节点，班杜拉观察学习）；
 //! - 共同度过社交时光增长亲密值；信任的同伴在身边提供安全感，压制负面记忆。
 //!
+//! M4 玩家的人生：
+//! - LOD 分层（技术文档 4.6）：玩家身边 T0 完整模拟，街区内 T1 常规（慢心跳、
+//!   小目睹半径），其余 T2 背景（简化选择 + 按天批量结算）。层级是状态的
+//!   确定性函数；降层不丢数据（记忆、关系、习惯全保留），升层即恢复完整模拟；
+//! - 习惯自动化（设计稿 4.4）：权重超阈值的行为自动执行、指令零消耗；
+//! - 负面记忆恢复（设计稿 4.6）：被恐惧抑制的行为指令加价并警示；
+//!   反复完成同类行为使恐惧消退（暴露疗法），亲近同伴加速恢复；
+//! - 密友查看（设计稿 4.7）：亲密值达标后可读对方需求与负面记忆；
+//! - 限期目标（设计稿 4.5）：戒断目标压制习惯权重，行为树仍选中时靠意志力
+//!   忍住，放弃则权重反弹。
+//!
 //! 代理按编号顺序结算，随机数用独立子流，回放不依赖调度细节。
 
 use crate::agent::Agent;
 use crate::area::AreaState;
 use crate::config::{BehaviorDef, Params, SimConfig, SpotDef};
+use crate::goal::Goal;
 use crate::log::{AgentSummary, AreaSummary, FactorBreakdown, LogEvent, Logger, LOG_VERSION};
 use crate::needs::{urgency, Needs, NEED_KEYS};
 use crate::relation::Relations;
 use crate::rng::{derive_seed, Rng, WorldSeed};
-use crate::space::{Pos, SpatialGrid};
+use crate::space::{dist, Pos, SpatialGrid};
 use crate::time::{hour_of, is_day_boundary, is_hour_boundary, quarter_of_day, Tick};
 use crate::tree::available_behaviors;
 use std::collections::BTreeMap;
@@ -60,10 +72,54 @@ pub struct BehaviorStatus {
     pub id: String,
     pub name: String,
     pub available: bool,
-    /// 预计意志力消耗（不含打断费）。
+    /// 预计意志力消耗（不含打断费；含恐惧/违约加价，自动化为 0）。
     pub est_cost: f64,
     /// 需求门未开时的提示。
     pub gate_note: String,
+    /// 习惯自动化（M4）：无需指令自动执行，指令零消耗。
+    pub automated: bool,
+    /// 恐惧警示（M4）：被正在生效的负面记忆抑制，执行要过心理关。
+    pub feared: bool,
+    /// 戒断目标进行中（M4）：下令即违约。
+    pub goal_avoided: bool,
+}
+
+/// 习惯报告条目（M4 验收："我的角色养成了某习惯，因为某经历"的载体）。
+#[derive(Debug, Clone)]
+pub struct HabitReport {
+    pub behavior: String,
+    pub weight: f64,
+    pub base: f64,
+    /// 权重相对基准的倍数（≥ 自动化阈值即已养成）。
+    pub ratio: f64,
+    pub execs: u64,
+    pub automated: bool,
+    /// 与该行为标签相关的记忆（强度降序），解释"因为某经历"。
+    pub related_memories: Vec<String>,
+}
+
+/// 密友查看（M4，设计稿 4.7）：亲密值达标后可见的对方部分心理状态。
+#[derive(Debug, Clone)]
+pub struct FriendView {
+    pub name: String,
+    pub bond: f64,
+    pub needs: Needs,
+    /// 正在做的行为（None = 空闲）。
+    pub current: Option<String>,
+    /// 正在生效的负面记忆（事件名, 强度），强度降序。
+    pub fears: Vec<(String, f64)>,
+}
+
+/// 限期目标状态（界面进度显示用）。
+#[derive(Debug, Clone)]
+pub struct GoalStatus {
+    pub behavior: String,
+    /// 剩余天数（向上取整）。
+    pub days_left: u64,
+    pub violations: u32,
+    pub resists: u32,
+    /// 目标压制已累计的量（放弃时会反弹回去）。
+    pub suppressed: f64,
 }
 
 pub struct World {
@@ -161,11 +217,98 @@ impl World {
         }
     }
 
-    /// 指定玩家角色（0 号代理）。
+    /// 指定玩家角色（0 号代理）。指定后立即分配 LOD 层级。
     pub fn set_player(&mut self, id: u32) {
         if let Some(a) = self.agents.iter_mut().find(|a| a.id == id) {
             a.is_player = true;
         }
+        self.refresh_lod();
+    }
+
+    /// LOD 层级分配（M4，技术文档 4.6）。状态的确定性函数：
+    /// 距玩家距离 + 与玩家的关系，按 (距离, 编号) 排序截断数量上限——
+    /// 不掷随机数、不依赖结算顺序，回放一致。无玩家角色时全体 T0（等价全模拟）。
+    /// - T0：玩家、身边 lod_t0_radius 内、密友（亲密 ≥ close_friend_bond）
+    /// - T1：lod_t1_radius 内、朋友（亲密 ≥ lod_friend_bond）
+    /// - T2：其余背景代理（不逐拍决策，按天批量结算）
+    pub fn refresh_lod(&mut self) {
+        let Some(ppos) = self
+            .agents
+            .iter()
+            .find(|a| a.is_player)
+            .map(|a| a.pos)
+        else {
+            for a in &mut self.agents {
+                a.lod = 0;
+            }
+            return;
+        };
+        let p = &self.cfg.params;
+        let pid = self
+            .agents
+            .iter()
+            .find(|a| a.is_player)
+            .map(|a| a.id)
+            .unwrap_or(0);
+        // 先按规则给出层级，再依 (距离, 编号) 截断数量上限（超额降一层）。
+        // 玩家与密友（剧情关联者）以距离 0 参与排名——关系和身边同权重，
+        // 拥挤时不会被挤出局；编号兜底保证确定性。
+        let mut t0: Vec<(f64, u32)> = Vec::new();
+        let mut t1: Vec<(f64, u32)> = Vec::new();
+        for a in &mut self.agents {
+            if a.is_player {
+                a.lod = 0;
+                t0.push((0.0, a.id));
+                continue;
+            }
+            let d = dist(a.pos, ppos);
+            let bond = self.relations.bond(pid, a.id);
+            if d <= p.lod_t0_radius || bond >= p.close_friend_bond {
+                a.lod = 0;
+                t0.push((if bond >= p.close_friend_bond { 0.0 } else { d }, a.id));
+            } else if d <= p.lod_t1_radius || bond >= p.lod_friend_bond {
+                a.lod = 1;
+                t1.push((d, a.id));
+            } else {
+                a.lod = 2;
+            }
+        }
+        t0.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+        // T0 超额部分降为 T1 候选，与原 T1 候选合并后再截 T1 上限。
+        let mut t1_all: Vec<(f64, u32)> = t1;
+        if t0.len() > p.lod_t0_cap {
+            t1_all.extend(t0[p.lod_t0_cap..].iter().copied());
+        }
+        t1_all.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+        let demote_to_t1: Vec<u32> = t0[p.lod_t0_cap.min(t0.len())..]
+            .iter()
+            .map(|(_, id)| *id)
+            .collect();
+        let demote_to_t2: Vec<u32> = t1_all[p.lod_t1_cap.min(t1_all.len())..]
+            .iter()
+            .map(|(_, id)| *id)
+            .collect();
+        for a in &mut self.agents {
+            // 注意先后：T0 溢出者可能又挤不进 T1（两级都超），先判 T2。
+            if demote_to_t2.contains(&a.id) {
+                a.lod = 2;
+            } else if demote_to_t1.contains(&a.id) {
+                a.lod = 1;
+            }
+            // 升层唤醒：刚进 T0/T1 的空闲代理别等过时的心跳。
+            if a.lod < 2 && a.current.is_none() {
+                a.next_heartbeat = a.next_heartbeat.min(self.tick + 5);
+            }
+        }
+    }
+
+    /// 代理当前 LOD 层级（工具与测试用）。
+    pub fn agent_lod(&self, id: u32) -> u8 {
+        self.agents
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.lod)
+            .unwrap_or(0)
     }
 
     // ---------- M2 猫群：关系与空间（测试与工具用入口） ----------
@@ -179,11 +322,34 @@ impl World {
     }
 
     /// 直接移动代理（测试与调试工具用；正常模拟中位置由行为决定）。
+    /// 玩家移动会改变 LOD 层级分配，立即重算。
     pub fn teleport(&mut self, id: u32, pos: Pos) {
         if let Some(a) = self.agents.iter_mut().find(|a| a.id == id) {
             a.pos = pos;
         }
         self.grid.move_to(id, pos);
+        if self.agents.iter().any(|a| a.id == id && a.is_player) {
+            self.refresh_lod();
+        }
+    }
+
+    /// 密友名单（亲密值 ≥ close_friend_bond，降序）——查看入口用。
+    pub fn close_friends(&self, id: u32) -> Vec<(u32, String, f64)> {
+        let threshold = self.cfg.params.close_friend_bond;
+        let mut v: Vec<(u32, String, f64)> = self
+            .relations
+            .top_for(id, usize::MAX)
+            .into_iter()
+            .filter(|(_, b)| *b >= threshold)
+            .filter_map(|(oid, b)| {
+                self.agents
+                    .iter()
+                    .find(|a| a.id == oid)
+                    .map(|a| (oid, a.name.clone(), b))
+            })
+            .collect();
+        v.sort_by(|x, y| y.2.total_cmp(&x.2));
+        v
     }
 
     /// 读取第 idx 个事件的下次发生拍（测试用）。
@@ -302,12 +468,25 @@ impl World {
         }
     }
 
+    /// 单条事件直接落日志与最近事件缓冲。指令与目标操作发生在 tick 之外，
+    /// 走这里——它们也应出现在交互工具的实时反馈里。
+    fn note(&mut self, ev: LogEvent) {
+        self.logger.log(&ev);
+        if self.collect_recent {
+            self.recent_events.push(ev);
+            if self.recent_events.len() > 512 {
+                self.recent_events.drain(0..self.recent_events.len() - 512);
+            }
+        }
+    }
+
     pub fn tick(&mut self) {
         self.tick += 1;
         let tick = self.tick;
         let mut events: Vec<LogEvent> = Vec::new();
 
-        // 日界：记忆习惯化回落与强度消退、地点整洁度恢复（清洁服务）。
+        // 日界：记忆习惯化回落与强度消退、地点整洁度恢复（清洁服务）、
+        // T2 背景代理的按天批量结算（LOD，M4）。
         if is_day_boundary(tick) {
             for a in &mut self.agents {
                 a.memory.daily_decay();
@@ -316,12 +495,16 @@ impl World {
             for state in self.area_states.values_mut() {
                 state.daily_clean(clean);
             }
+            self.settle_background_day(&mut events);
         }
 
-        // 需求衰减（每拍 = 每模拟分钟）。
+        // 需求衰减（每拍 = 每模拟分钟）。T2 背景代理跳过逐拍衰减，
+        // 改在日界批量结算时一次扣一整天（LOD：统计近似，需求在时段间静止）。
         let decay = self.cfg.needs.clone();
         for a in &mut self.agents {
-            a.needs.decay(&decay, 1);
+            if a.lod != 2 {
+                a.needs.decay(&decay, 1);
+            }
         }
 
         // 环境事件：收集到期者，按定义顺序应用（确定性顺序）。
@@ -380,11 +563,15 @@ impl World {
                     .uniform_int(def.interval_min, def.interval_max);
         }
 
-        // 小时边界：习惯衰减、意志力缓慢回复、状态快照、地点状态快照。
+        // 小时边界：LOD 重分配（确定性函数）、习惯衰减（含目标压制）、
+        // 限期目标到期结算、意志力缓慢回复、状态快照、地点状态快照。
         if is_hour_boundary(tick) {
+            self.refresh_lod();
             let rate = self.cfg.params.habit_decay_hourly;
+            let gmult = self.cfg.params.goal_decay_mult;
             for a in &mut self.agents {
                 a.habit_decay(rate);
+                a.goal_hourly_suppress(rate, gmult);
                 a.willpower = (a.willpower + 0.2).min(100.0);
                 if self.logger.enabled {
                     events.push(LogEvent::Snapshot {
@@ -394,6 +581,30 @@ impl World {
                         weights: a.weights.clone(),
                         memories: a.memory.entries.len(),
                         willpower: a.willpower,
+                        lod: a.lod,
+                    });
+                }
+            }
+            // 限期目标到期：零违约 = 成功（压制已转化为自然衰减，习惯真的改掉了）。
+            for ai in 0..self.agents.len() {
+                let ended: Vec<usize> = self.agents[ai]
+                    .goals
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, g)| !g.is_active(tick))
+                    .map(|(i, _)| i)
+                    .collect();
+                for gi in ended.into_iter().rev() {
+                    let g = self.agents[ai].goals.remove(gi);
+                    events.push(LogEvent::GoalEnd {
+                        tick,
+                        agent: self.agents[ai].id,
+                        behavior: g.behavior.clone(),
+                        success: g.violations == 0,
+                        abandoned: false,
+                        violations: g.violations,
+                        resists: g.resists,
+                        rebound: 0.0,
                     });
                 }
             }
@@ -464,7 +675,50 @@ impl World {
             a.habit_boost(&bid, alpha);
             a.record_exec(&bid);
             a.current = None;
-            a.next_heartbeat = tick + 2 + a.rng_decision.uniform_int(0, 6);
+            // 完成后的下次心跳：T1 常规代理慢一拍（LOD）；T0 维持灵敏。
+            a.next_heartbeat = tick
+                + if a.lod == 1 {
+                    a.rng_decision.uniform_int(
+                        self.cfg.params.lod_t1_heartbeat_min,
+                        self.cfg.params.lod_t1_heartbeat_max,
+                    )
+                } else {
+                    2 + a.rng_decision.uniform_int(0, 6)
+                };
+            // M4 暴露恢复（设计稿 4.6）：完成"正在被恐惧抑制"的行为一次——
+            // 该行为的记忆乘数低于恐惧门槛（角色是硬着头皮做的）——相关负面
+            // 记忆强度消退。反复低强度尝试恢复的是功能而非删除记忆：乘数回到
+            // 门槛以上后暴露不再触发，恐惧停留在"不再碍事"的水平。
+            // 亲近同伴在身边（安全感 > 0）时恢复更快（朋友的鼓励）。
+            if let Some(def) = &def {
+                let comfort = comfort_of(&self.grid, &self.relations, &self.cfg.params, a);
+                let spot_tags: Vec<String> = def
+                    .spot
+                    .as_ref()
+                    .and_then(|s| self.spots.get(s))
+                    .map(|s| s.tags.clone())
+                    .unwrap_or_default();
+                let mem_map = a.memory.query(quarter_of_day(tick), &spot_tags, comfort);
+                let mm: f64 = def
+                    .tags
+                    .iter()
+                    .map(|t| mem_map.get(t).copied().unwrap_or(1.0))
+                    .product::<f64>()
+                    .clamp(0.05, 20.0);
+                if mm < self.cfg.params.fear_mem_mult {
+                    let faded =
+                        a.memory
+                            .expose(&def.tags, self.cfg.params.exposure_decay, comfort > 0.05);
+                    if faded > 0.005 {
+                        events.push(LogEvent::Exposure {
+                            tick,
+                            agent: a.id,
+                            behavior: bid.clone(),
+                            faded,
+                        });
+                    }
+                }
+            }
             events.push(LogEvent::ActionEnd {
                 tick,
                 agent: a.id,
@@ -525,6 +779,7 @@ impl World {
         }
 
         // 心跳决策（空闲且到期的代理；字段级借用避免冲突）。
+        // T2 背景代理不逐拍决策（LOD）：它们的每一天在日界批量结算。
         let agents = &mut self.agents;
         let cfg = &self.cfg;
         let behaviors = &self.behaviors;
@@ -533,17 +788,18 @@ impl World {
         let relations = &self.relations;
         let grid = &mut self.grid;
         for a in agents.iter_mut() {
-            if a.current.is_none() && tick >= a.next_heartbeat {
-                let comfort = comfort_of(grid, relations, &cfg.params, a);
-                events.extend(decide(cfg, behaviors, spots, area_states, a, tick, comfort));
-                self.decisions_done += 1;
-                // 行为开始 → 移动到行为地点（无地点行为原地不动）。
-                if let Some((bid, _, _)) = &a.current {
-                    if let Some(spot_id) = behaviors.get(bid).and_then(|d| d.spot.clone()) {
-                        if let Some(sd) = spots.get(&spot_id) {
-                            a.pos = (sd.x, sd.y);
-                            grid.move_to(a.id, a.pos);
-                        }
+            if a.lod == 2 || a.current.is_some() || tick < a.next_heartbeat {
+                continue;
+            }
+            let comfort = comfort_of(grid, relations, &cfg.params, a);
+            events.extend(decide(cfg, behaviors, spots, area_states, a, tick, comfort));
+            self.decisions_done += 1;
+            // 行为开始 → 移动到行为地点（无地点行为原地不动）。
+            if let Some((bid, _, _)) = &a.current {
+                if let Some(spot_id) = behaviors.get(bid).and_then(|d| d.spot.clone()) {
+                    if let Some(sd) = spots.get(&spot_id) {
+                        a.pos = (sd.x, sd.y);
+                        grid.move_to(a.id, a.pos);
                     }
                 }
             }
@@ -648,7 +904,9 @@ impl World {
             }
         }
         // 模仿节点：目睹亲近同伴的显著遭遇，按亲密值折扣写入间接记忆。
+        // T1 常规代理只留意更近处的动静（LOD：事件监听范围小）。
         let witness_radius = self.cfg.params.witness_radius;
+        let t1_scale = self.cfg.params.lod_t1_witness_scale;
         let imitation = self.cfg.params.imitation_factor;
         let min_bond = self.cfg.params.imitation_min_bond;
         for vid in notable {
@@ -660,6 +918,14 @@ impl World {
                 .collect();
             for a in &mut self.agents {
                 if a.id == vid || !witness_set.contains(&a.id) {
+                    continue;
+                }
+                let wr = if a.lod == 1 {
+                    witness_radius * t1_scale
+                } else {
+                    witness_radius
+                };
+                if dist(a.pos, vpos) > wr {
                     continue;
                 }
                 let bond = self.relations.bond(a.id, vid);
@@ -693,6 +959,123 @@ impl World {
             }
         }
         had_direct_victims
+    }
+
+    /// T2 背景代理的按天批量结算（M4，LOD）：替代逐拍决策的统计近似。
+    /// 每个时段（凌晨/上午/下午/夜晚的代表小时）做一次简化选择——需求门
+    /// 放行的行为里取高权重前 K；需求临界时强制恢复（生理反射的批量版），
+    /// 立即结算效果、习惯与到访体验。记忆查询跳过（这正是 LOD 省的大头），
+    /// 但记忆、关系、习惯权重全保留——升层后"这些年"的经历都在。
+    fn settle_background_day(&mut self, events: &mut Vec<LogEvent>) {
+        let top_k = self.cfg.params.lod_t2_top_k;
+        let critical = self.cfg.critical_need;
+        let alpha = self.cfg.params.alpha;
+        for idx in 0..self.agents.len() {
+            if self.agents[idx].lod != 2 {
+                continue;
+            }
+            for hour in [3u32, 9, 15, 21] {
+                // 本时段前先扣掉一整天的需求衰减（T2 不做逐拍衰减；
+                // 升降层切换日的几小时误差属于统计近似的固有精度）。
+                if hour == 3 {
+                    self.agents[idx].needs.decay(&self.cfg.needs, crate::time::TICKS_PER_DAY);
+                }
+                // 简化树：门放行的行为（需求门 + 时间门，与完整树同规）。
+                let mut ids: Vec<&str> = Vec::new();
+                available_behaviors(
+                    self.cfg.tree_for(&self.agents[idx].species),
+                    &self.agents[idx].needs,
+                    &self.behaviors,
+                    hour,
+                    &mut ids,
+                );
+                let avail: Vec<String> = ids.into_iter().map(|s| s.to_string()).collect();
+                if avail.is_empty() {
+                    continue;
+                }
+                // 生理反射批量版：任一需求临界 → 可用的最强恢复行为。
+                let forced = NEED_KEYS
+                    .iter()
+                    .find(|need| {
+                        self.agents[idx].needs.get(need).unwrap_or(100.0) < critical
+                    })
+                    .and_then(|need| {
+                        avail
+                            .iter()
+                            .find(|b| self.behaviors[*b].effect_on(need) > 0.0)
+                            .cloned()
+                    });
+                let choice = match forced {
+                    Some(b) => b,
+                    None => {
+                        // 高权重前 K 里加权抽一个（跳过记忆查询的简化选择）。
+                        let a = &self.agents[idx];
+                        let mut scored: Vec<(String, f64)> = avail
+                            .into_iter()
+                            .map(|b| {
+                                let def = &self.behaviors[&b];
+                                let w = a.weights.get(&b).copied().unwrap_or(def.base_weight);
+                                let drive = def.drive_need().unwrap_or("fun");
+                                let nm = if def.effect_on(drive) > 0.0 {
+                                    urgency(a.needs.get(drive).unwrap_or(100.0))
+                                } else {
+                                    0.6
+                                };
+                                (b, w * nm)
+                            })
+                            .collect();
+                        scored.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
+                        scored.truncate(top_k.max(1));
+                        let effs: Vec<f64> = scored.iter().map(|(_, e)| *e).collect();
+                        let temp = self.agents[idx].temperature;
+                        let pick = softmax_pick(
+                            &effs,
+                            temp,
+                            &mut self.agents[idx].rng_decision,
+                        );
+                        scored.swap_remove(pick).0
+                    }
+                };
+                // 立即结算：需求效果、意志力恢复、习惯强化、到访体验。
+                let def = self.behaviors[&choice].clone();
+                let a = &mut self.agents[idx];
+                for (need, delta) in &def.effects {
+                    a.needs.add(need, *delta);
+                }
+                if def.tags.iter().any(|t| t == "sleep") {
+                    a.willpower = (a.willpower + 25.0).min(100.0);
+                }
+                a.habit_boost(&choice, alpha);
+                a.record_exec(&choice);
+                let area_id = def
+                    .spot
+                    .as_ref()
+                    .and_then(|s| self.spots.get(s))
+                    .and_then(|s| s.area.clone());
+                if let Some(aid) = area_id {
+                    if let Some(state) = self.area_states.get_mut(&aid) {
+                        let exp = behavior_experience(&def);
+                        state.experience(exp, self.cfg.params.area_exp_alpha);
+                        let litter_scale = self
+                            .cfg
+                            .areas
+                            .iter()
+                            .find(|a| a.id == aid)
+                            .map(|a| a.litter_scale)
+                            .unwrap_or(1.0);
+                        state.litter(self.cfg.params.visit_litter * litter_scale);
+                        if self.logger.enabled {
+                            events.push(LogEvent::ReputationChange {
+                                tick: self.tick,
+                                area: aid.clone(),
+                                experience: exp,
+                                value: state.reputation,
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ---------- 玩家指令（意志节点） ----------
@@ -736,7 +1119,17 @@ impl World {
         );
         // 生理反射压倒一切：临界需求未解决时，只接受对应的恢复行为。
         let forced = forced_choice(&self.cfg, &self.behaviors, &a.needs, &options);
-        let (cost, refusal) = match options.iter().find(|o| o.behavior == behavior) {
+        // 定价（M4 完整意志系统）：
+        // - 基准 5 + 20×(1−合拍度)；
+        // - 习惯自动化（权重达阈值）→ 零消耗，习惯成自然；
+        // - 恐惧抑制（记忆乘数低于门槛）→ 加价：过心理关要花力气；
+        // - 戒断目标进行中 → 违约加价（行为树从不禁止指令，只收代价）。
+        let auto_ratio = self.cfg.params.habit_auto_ratio;
+        let fear_gate = self.cfg.params.fear_mem_mult;
+        let (mut cost, refusal, automated, feared) = match options
+            .iter()
+            .find(|o| o.behavior == behavior)
+        {
             Some(o) => {
                 let eff_max = options
                     .iter()
@@ -747,16 +1140,39 @@ impl World {
                 } else {
                     1.0
                 };
-                (5.0 + 20.0 * (1.0 - ratio), None)
+                let automated = a.is_automated(behavior, auto_ratio);
+                let base = if automated {
+                    0.0
+                } else {
+                    5.0 + 20.0 * (1.0 - ratio)
+                };
+                let feared = o.mem_mult < fear_gate;
+                (
+                    base + if feared {
+                        self.cfg.params.fear_command_cost
+                    } else {
+                        0.0
+                    },
+                    None,
+                    automated,
+                    feared,
+                )
             }
-            None if forced.as_deref() == Some(behavior) => (3.0, None),
-            None if forced.is_some() => (0.0, Some("它生理需求告急，现在听不进别的".to_string())),
+            None if forced.as_deref() == Some(behavior) => (3.0, None, false, false),
+            None if forced.is_some() => (
+                0.0,
+                Some("它生理需求告急，现在听不进别的".to_string()),
+                false,
+                false,
+            ),
             None => (
                 0.0,
                 Some(format!(
                     "它现在没这个念头（{}）",
                     gate_note(&self.cfg, &def)
                 )),
+                false,
+                false,
             ),
         };
         if let Some(reason) = refusal {
@@ -765,7 +1181,7 @@ impl World {
                 cost: 0.0,
                 reason,
             };
-            self.logger.log(&LogEvent::PlayerCommand {
+            self.note(LogEvent::PlayerCommand {
                 tick,
                 agent: agent_id,
                 behavior: behavior.to_string(),
@@ -775,7 +1191,12 @@ impl World {
             });
             return out;
         }
-        // 打断当前行为额外收费。
+        // 戒断目标进行中：下令即违约（额外代价 + 违约计数）。
+        let goal_break = a.active_goal_idx(behavior, tick).is_some();
+        if goal_break {
+            cost += self.cfg.params.goal_break_cost;
+        }
+        // 打断当前行为额外收费（自动化习惯也不例外——打断谁都要费劲）。
         let interrupting = a.current.is_some();
         let cost = (cost + if interrupting { 8.0 } else { 0.0 }).round();
         if a.willpower + 1e-9 < cost {
@@ -787,7 +1208,7 @@ impl World {
                     a.willpower
                 ),
             };
-            self.logger.log(&LogEvent::PlayerCommand {
+            self.note(LogEvent::PlayerCommand {
                 tick,
                 agent: agent_id,
                 behavior: behavior.to_string(),
@@ -798,9 +1219,21 @@ impl World {
             return out;
         }
         a.willpower -= cost;
+        let mut notes: Vec<LogEvent> = Vec::new();
+        if goal_break {
+            if let Some(gi) = a.active_goal_idx(behavior, tick) {
+                a.goals[gi].violations += 1;
+                notes.push(LogEvent::GoalViolation {
+                    tick,
+                    agent: agent_id,
+                    behavior: behavior.to_string(),
+                    commanded: true,
+                });
+            }
+        }
         if interrupting {
             if let Some((bid, _, _)) = a.current.take() {
-                self.logger.log(&LogEvent::ActionEnd {
+                notes.push(LogEvent::ActionEnd {
                     tick,
                     agent: agent_id,
                     behavior: bid,
@@ -809,7 +1242,13 @@ impl World {
         }
         a.next_heartbeat = tick + 1;
         a.pending_command = Some(behavior.to_string());
-        let reaction = if cost <= 6.0 {
+        let reaction = if goal_break {
+            "它违背了对自己的承诺，一脸愧疚地去了"
+        } else if feared {
+            "它心里发怵，磨蹭了半天还是硬着头皮去了"
+        } else if automated {
+            "习惯成自然，它自己就去了"
+        } else if cost <= 6.0 {
             "它立刻照做了"
         } else if cost < 15.0 {
             "它磨蹭了一会儿，还是去了"
@@ -821,7 +1260,10 @@ impl World {
             cost,
             reason: reaction.to_string(),
         };
-        self.logger.log(&LogEvent::PlayerCommand {
+        for ev in notes {
+            self.note(ev);
+        }
+        self.note(LogEvent::PlayerCommand {
             tick,
             agent: agent_id,
             behavior: behavior.to_string(),
@@ -832,8 +1274,14 @@ impl World {
         out
     }
 
-    /// 菜单状态：每个行为的可用性、预计意志力消耗、门未开的提示。
+    /// 菜单状态：每个行为的可用性、预计意志力消耗（与 issue_command 同价，
+    /// 不含打断费）、门未开的提示、M4 标记（习惯自动化 / 恐惧警示 / 戒断目标）。
+    /// 只列该代理物种树上的行为（多物种同街时菜单不串树）。
     pub fn behaviors_status(&mut self, agent_id: u32) -> Vec<BehaviorStatus> {
+        let species = match self.agents.iter().find(|a| a.id == agent_id) {
+            Some(a) => a.species.clone(),
+            None => return vec![],
+        };
         let a = match self.agents.iter_mut().find(|a| a.id == agent_id) {
             Some(a) => a,
             None => return vec![],
@@ -853,33 +1301,220 @@ impl World {
             .iter()
             .map(|o| o.eff)
             .fold(f64::NEG_INFINITY, f64::max);
+        let auto_ratio = self.cfg.params.habit_auto_ratio;
+        let fear_gate = self.cfg.params.fear_mem_mult;
+        let fear_cost = self.cfg.params.fear_command_cost;
+        let goal_cost = self.cfg.params.goal_break_cost;
         self.cfg
-            .behaviors
-            .iter()
-            .map(|def| match options.iter().find(|o| o.behavior == def.id) {
-                Some(o) => {
-                    let ratio = if eff_max > 0.0 {
-                        (o.eff / eff_max).clamp(0.0, 1.0)
-                    } else {
-                        1.0
-                    };
-                    BehaviorStatus {
-                        id: def.id.clone(),
-                        name: def.display_name().to_string(),
-                        available: true,
-                        est_cost: (5.0 + 20.0 * (1.0 - ratio)).round(),
-                        gate_note: String::new(),
+            .species_behaviors(&species)
+            .into_iter()
+            .map(|(bid, _)| {
+                let def = &self.behaviors[&bid];
+                match options.iter().find(|o| o.behavior == bid) {
+                    Some(o) => {
+                        let ratio = if eff_max > 0.0 {
+                            (o.eff / eff_max).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
+                        let automated = a.is_automated(&bid, auto_ratio);
+                        let feared = o.mem_mult < fear_gate;
+                        let goal_avoided = a.active_goal_idx(&bid, tick).is_some();
+                        let cost = (if automated {
+                            0.0
+                        } else {
+                            5.0 + 20.0 * (1.0 - ratio)
+                        } + if feared { fear_cost } else { 0.0 }
+                            + if goal_avoided { goal_cost } else { 0.0 })
+                            .round();
+                        BehaviorStatus {
+                            id: bid.clone(),
+                            name: def.display_name().to_string(),
+                            available: true,
+                            est_cost: cost,
+                            gate_note: String::new(),
+                            automated,
+                            feared,
+                            goal_avoided,
+                        }
                     }
+                    None => BehaviorStatus {
+                        id: bid.clone(),
+                        name: def.display_name().to_string(),
+                        available: false,
+                        est_cost: 0.0,
+                        gate_note: gate_note(&self.cfg, def),
+                        automated: a.is_automated(&bid, auto_ratio),
+                        feared: false,
+                        goal_avoided: a.active_goal_idx(&bid, tick).is_some(),
+                    },
                 }
-                None => BehaviorStatus {
-                    id: def.id.clone(),
-                    name: def.display_name().to_string(),
-                    available: false,
-                    est_cost: 0.0,
-                    gate_note: gate_note(&self.cfg, def),
-                },
             })
             .collect()
+    }
+
+    // ---------- M4 玩家的人生：限期目标 / 习惯报告 / 密友查看 ----------
+
+    /// 给玩家角色设一个戒断目标（设计稿 4.5）：`days` 天内不做 `behavior`。
+    /// 只能指挥玩家角色；同一行为同时只有一个目标。
+    pub fn set_goal(&mut self, agent_id: u32, behavior: &str, days: u64) -> Result<(), String> {
+        let tick = self.tick;
+        let a = self
+            .agents
+            .iter_mut()
+            .find(|a| a.id == agent_id && a.is_player)
+            .ok_or("只能给玩家角色定目标")?;
+        if !a.weights.contains_key(behavior) {
+            return Err(format!(
+                "它不会做【{behavior}】（不在它的行为树上）"
+            ));
+        }
+        if a.goals.iter().any(|g| g.is_active(tick) && g.behavior == behavior) {
+            return Err(format!("【{behavior}】已有进行中的目标"));
+        }
+        let deadline = tick + days * crate::time::TICKS_PER_DAY;
+        a.goals.push(Goal::new(behavior, tick, deadline));
+        self.note(LogEvent::GoalSet {
+            tick,
+            agent: agent_id,
+            behavior: behavior.to_string(),
+            deadline,
+        });
+        Ok(())
+    }
+
+    /// 中途放弃目标：suppressed 还回权重（旧习惯立刻反弹），返回 (行为, 反弹量)。
+    pub fn abandon_goal(&mut self, agent_id: u32, behavior: &str) -> Result<(String, f64), String> {
+        let tick = self.tick;
+        let a = self
+            .agents
+            .iter_mut()
+            .find(|a| a.id == agent_id)
+            .ok_or("没有这个角色")?;
+        let gi = a
+            .goals
+            .iter()
+            .position(|g| g.behavior == behavior && g.is_active(tick))
+            .ok_or(format!("【{behavior}】没有进行中的目标"))?;
+        let rebound = a.goal_rebound(gi);
+        let g = a.goals.remove(gi);
+        self.note(LogEvent::GoalEnd {
+            tick,
+            agent: agent_id,
+            behavior: g.behavior.clone(),
+            success: false,
+            abandoned: true,
+            violations: g.violations,
+            resists: g.resists,
+            rebound,
+        });
+        Ok((g.behavior, rebound))
+    }
+
+    /// 目标列表的进度状态（界面显示用）。
+    pub fn goal_status(&self, agent_id: u32) -> Vec<GoalStatus> {
+        let Some(a) = self.agents.iter().find(|a| a.id == agent_id) else {
+            return vec![];
+        };
+        a.goals
+            .iter()
+            .filter(|g| g.is_active(self.tick))
+            .map(|g| GoalStatus {
+                behavior: g.behavior.clone(),
+                days_left: ((g.deadline - self.tick) as f64 / 1440.0).ceil() as u64,
+                violations: g.violations,
+                resists: g.resists,
+                suppressed: g.suppressed,
+            })
+            .collect()
+    }
+
+    /// 习惯报告（M4 验收载体）：该角色每个行为的权重强度、是否自动化、
+    /// 以及相关的记忆条目——"养成某习惯，因为某经历"的解释与数据一致。
+    pub fn habit_report(&self, agent_id: u32) -> Vec<HabitReport> {
+        let Some(a) = self.agents.iter().find(|a| a.id == agent_id) else {
+            return vec![];
+        };
+        let auto_ratio = self.cfg.params.habit_auto_ratio;
+        let mut out: Vec<HabitReport> = a
+            .weights
+            .iter()
+            .map(|(bid, w)| {
+                let base = a.base_weights.get(bid).copied().unwrap_or(*w);
+                let tags = self
+                    .behaviors
+                    .get(bid)
+                    .map(|d| d.tags.clone())
+                    .unwrap_or_default();
+                let mut rel: Vec<(f64, String)> = a
+                    .memory
+                    .entries
+                    .iter()
+                    .filter(|m| m.mults.keys().any(|t| tags.contains(t)))
+                    .map(|m| {
+                        (
+                            m.strength,
+                            format!(
+                                "{}(时段{}，强度{:.2}，{})",
+                                m.event,
+                                m.quarter,
+                                m.strength,
+                                if m.valence < 0.0 { "负面" } else { "正面" }
+                            ),
+                        )
+                    })
+                    .collect();
+                rel.sort_by(|x, y| y.0.total_cmp(&x.0));
+                HabitReport {
+                    behavior: bid.clone(),
+                    weight: *w,
+                    base,
+                    ratio: w / base.max(1e-9),
+                    execs: a.exec_counts.get(bid).copied().unwrap_or(0),
+                    automated: a.is_automated(bid, auto_ratio),
+                    related_memories: rel.into_iter().take(2).map(|(_, s)| s).collect(),
+                }
+            })
+            .collect();
+        out.sort_by(|x, y| y.ratio.total_cmp(&x.ratio));
+        out
+    }
+
+    /// 密友查看（设计稿 4.7）：亲密值达到 close_friend_bond 才能看见对方的
+    /// 部分心理状态——需求与正在生效的负面记忆。不够亲近只能看到表面。
+    pub fn inspect_friend(&self, viewer_id: u32, target_id: u32) -> Result<FriendView, String> {
+        let (_viewer, t) = match (
+            self.agents.iter().find(|a| a.id == viewer_id),
+            self.agents.iter().find(|a| a.id == target_id),
+        ) {
+            (Some(a), Some(t)) => (a, t),
+            _ => return Err("没有这个角色".into()),
+        };
+        if viewer_id == target_id {
+            return Err("这是它自己（用状态面板看）".into());
+        }
+        let bond = self.relations.bond(viewer_id, target_id);
+        let threshold = self.cfg.params.close_friend_bond;
+        if bond < threshold {
+            return Err(format!(
+                "你们还不够亲近（亲密 {bond:.2} < {threshold:.2}），看不出它在想什么"
+            ));
+        }
+        let mut fears: Vec<(String, f64)> = t
+            .memory
+            .entries
+            .iter()
+            .filter(|m| m.valence < 0.0 && m.strength > 0.1)
+            .map(|m| (m.event.clone(), m.strength))
+            .collect();
+        fears.sort_by(|x, y| y.1.total_cmp(&x.1));
+        Ok(FriendView {
+            name: t.name.clone(),
+            bond,
+            needs: t.needs,
+            current: t.current.as_ref().map(|(b, _, _)| b.clone()),
+            fears: fears.into_iter().take(3).collect(),
+        })
     }
 
     /// 结束时计算汇总（行为分布、与 0 号的总变差距离、主要记忆、亲近关系），
@@ -952,7 +1587,7 @@ impl World {
 }
 
 /// 决策核心（自由函数：cfg/behaviors/spots 只读，代理可变）。
-/// 返回 [Decision, ActionStart] 两条日志事件。
+/// 返回 [GoalResist/GoalViolation…]、[Decision, ActionStart] 日志事件。
 fn decide(
     cfg: &SimConfig,
     behaviors: &BTreeMap<String, BehaviorDef>,
@@ -963,9 +1598,13 @@ fn decide(
     comfort: f64,
 ) -> Vec<LogEvent> {
     let options = compute_options(cfg, behaviors, spots, area_states, a, tick, comfort);
+    let auto_ratio = cfg.params.habit_auto_ratio;
+    // 限期目标对抗过程中产生的事件（忍住/失守），排在 Decision 之前。
+    let mut extra: Vec<LogEvent> = Vec::new();
 
     let (choice, factors) = if let Some(cmd) = a.pending_command.take() {
         // 第四层：玩家指令覆盖（成本已在 issue_command 结算）。
+        let auto = a.is_automated(&cmd, auto_ratio);
         match options.iter().find(|o| o.behavior == cmd) {
             Some(o) => (
                 cmd.clone(),
@@ -978,6 +1617,7 @@ fn decide(
                     comfort,
                     forced: false,
                     will_command: true,
+                    habit_auto: auto,
                 },
             ),
             None => (
@@ -991,6 +1631,7 @@ fn decide(
                     comfort,
                     forced: false,
                     will_command: true,
+                    habit_auto: auto,
                 },
             ),
         }
@@ -1007,6 +1648,7 @@ fn decide(
                 comfort,
                 forced: true,
                 will_command: false,
+                habit_auto: false,
             },
         )
     } else if let Some(o) = forced_choice(cfg, behaviors, &a.needs, &options) {
@@ -1025,26 +1667,125 @@ fn decide(
                 comfort,
                 forced: true,
                 will_command: false,
+                habit_auto: a.is_automated(&o, auto_ratio),
             },
         )
     } else {
         // 第三层：加权随机选择。
         let effs: Vec<f64> = options.iter().map(|o| o.eff).collect();
-        let idx = softmax_pick(&effs, a.temperature, &mut a.rng_decision);
-        let o = &options[idx];
-        (
-            o.behavior.clone(),
-            FactorBreakdown {
-                base: o.base,
-                weight: o.weight,
-                need_mult: o.need_mult,
-                mem_mult: o.mem_mult,
-                area_mult: o.area_mult,
-                comfort,
-                forced: false,
-                will_command: false,
-            },
-        )
+        let mut idx = softmax_pick(&effs, a.temperature, &mut a.rng_decision);
+        // M4 限期目标（戒断）：行为树仍选中戒断对象——玩家角色用意志力忍住
+        //（换选次优）；意志力不够则失守（执行 + 违约计数）。
+        // 生理反射分支不受此限（上面已 return），不饿死自己。
+        if a.is_player {
+            let picked = options[idx].behavior.clone();
+            if let Some(gi) = a.active_goal_idx(&picked, tick) {
+                let cost = cfg.params.goal_resist_cost;
+                if a.willpower + 1e-9 >= cost {
+                    a.willpower -= cost;
+                    a.goals[gi].resists += 1;
+                    extra.push(LogEvent::GoalResist {
+                        tick,
+                        agent: a.id,
+                        behavior: picked,
+                        cost,
+                    });
+                    // 忍住：剔除该行为重新选择。
+                    let filtered: Vec<usize> = (0..options.len()).filter(|&i| i != idx).collect();
+                    if filtered.is_empty() {
+                        // 只剩这一个念头：忍住就是原地待一会儿。
+                        (
+                            "rest".to_string(),
+                            FactorBreakdown {
+                                base: 1.0,
+                                weight: options[idx].weight,
+                                need_mult: 1.0,
+                                mem_mult: 1.0,
+                                area_mult: 1.0,
+                                comfort,
+                                forced: false,
+                                will_command: false,
+                                habit_auto: false,
+                            },
+                        )
+                    } else {
+                        let effs2: Vec<f64> = filtered.iter().map(|&i| options[i].eff).collect();
+                        idx = filtered[softmax_pick(&effs2, a.temperature, &mut a.rng_decision)];
+                        let o = &options[idx];
+                        (
+                            o.behavior.clone(),
+                            FactorBreakdown {
+                                base: o.base,
+                                weight: o.weight,
+                                need_mult: o.need_mult,
+                                mem_mult: o.mem_mult,
+                                area_mult: o.area_mult,
+                                comfort,
+                                forced: false,
+                                will_command: false,
+                                habit_auto: a.is_automated(&o.behavior, auto_ratio),
+                            },
+                        )
+                    }
+                } else {
+                    // 意志力耗尽，失守。
+                    a.goals[gi].violations += 1;
+                    extra.push(LogEvent::GoalViolation {
+                        tick,
+                        agent: a.id,
+                        behavior: picked,
+                        commanded: false,
+                    });
+                    let o = &options[idx];
+                    (
+                        o.behavior.clone(),
+                        FactorBreakdown {
+                            base: o.base,
+                            weight: o.weight,
+                            need_mult: o.need_mult,
+                            mem_mult: o.mem_mult,
+                            area_mult: o.area_mult,
+                            comfort,
+                            forced: false,
+                            will_command: false,
+                            habit_auto: a.is_automated(&o.behavior, auto_ratio),
+                        },
+                    )
+                }
+            } else {
+                let o = &options[idx];
+                (
+                    o.behavior.clone(),
+                    FactorBreakdown {
+                        base: o.base,
+                        weight: o.weight,
+                        need_mult: o.need_mult,
+                        mem_mult: o.mem_mult,
+                        area_mult: o.area_mult,
+                        comfort,
+                        forced: false,
+                        will_command: false,
+                        habit_auto: a.is_automated(&o.behavior, auto_ratio),
+                    },
+                )
+            }
+        } else {
+            let o = &options[idx];
+            (
+                o.behavior.clone(),
+                FactorBreakdown {
+                    base: o.base,
+                    weight: o.weight,
+                    need_mult: o.need_mult,
+                    mem_mult: o.mem_mult,
+                    area_mult: o.area_mult,
+                    comfort,
+                    forced: false,
+                    will_command: false,
+                    habit_auto: a.is_automated(&o.behavior, auto_ratio),
+                },
+            )
+        }
     };
 
     // 设置动作。
@@ -1057,21 +1798,20 @@ fn decide(
     a.current = Some((choice.clone(), tick, until));
     a.next_heartbeat = until;
 
-    vec![
-        LogEvent::Decision {
-            tick,
-            agent: a.id,
-            temperature: a.temperature,
-            factors,
-            choice: choice.clone(),
-        },
-        LogEvent::ActionStart {
-            tick,
-            agent: a.id,
-            behavior: choice,
-            until,
-        },
-    ]
+    extra.push(LogEvent::Decision {
+        tick,
+        agent: a.id,
+        temperature: a.temperature,
+        factors,
+        choice: choice.clone(),
+    });
+    extra.push(LogEvent::ActionStart {
+        tick,
+        agent: a.id,
+        behavior: choice,
+        until,
+    });
+    extra
 }
 
 /// 安全感：亲密值达标（comfort_min_bond）的同伴在舒适半径内，

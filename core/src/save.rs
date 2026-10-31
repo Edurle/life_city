@@ -26,7 +26,7 @@ pub struct SaveState {
     pub decisions_done: u64,
 }
 
-pub const SAVE_VERSION: u32 = 3;
+pub const SAVE_VERSION: u32 = 4;
 
 impl World {
     /// 导出二进制快照。

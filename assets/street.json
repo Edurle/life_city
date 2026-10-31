@@ -33,7 +33,24 @@
     "area_mult_min": 0.35,
     "area_mult_span": 1.1,
     "visit_litter": 0.004,
-    "clean_daily": 0.35
+    "clean_daily": 0.35,
+    "lod_t0_radius": 12.0,
+    "lod_t1_radius": 22.0,
+    "lod_t0_cap": 64,
+    "lod_t1_cap": 256,
+    "lod_t1_heartbeat_min": 5,
+    "lod_t1_heartbeat_max": 30,
+    "lod_t1_witness_scale": 0.5,
+    "lod_t2_top_k": 3,
+    "lod_friend_bond": 0.5,
+    "habit_auto_ratio": 1.6,
+    "fear_mem_mult": 0.75,
+    "fear_command_cost": 10.0,
+    "exposure_decay": 0.88,
+    "close_friend_bond": 0.75,
+    "goal_resist_cost": 6.0,
+    "goal_break_cost": 15.0,
+    "goal_decay_mult": 4.0
   },
   "areas": [
     {
@@ -440,6 +457,23 @@
       "spot": "shopfront"
     },
     {
+      "id": "late_snack",
+      "name": "吃夜宵",
+      "base_weight": 2.2,
+      "duration_min": 15,
+      "duration_max": 30,
+      "effects": {
+        "hunger": 25,
+        "fun": 12
+      },
+      "tags": [
+        "food",
+        "night",
+        "home"
+      ],
+      "spot": "table"
+    },
+    {
       "id": "stroll",
       "name": "散步",
       "base_weight": 1.2,
@@ -810,6 +844,15 @@
                 "behavior": "stroll"
               }
             ]
+          }
+        },
+        {
+          "type": "time_gate",
+          "from": 21,
+          "to": 24,
+          "child": {
+            "type": "action",
+            "behavior": "late_snack"
           }
         },
         {

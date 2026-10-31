@@ -167,6 +167,64 @@ pub struct Params {
     /// 整洁度每日恢复量（清洁服务）。
     #[serde(default = "d_clean_daily")]
     pub clean_daily: f64,
+    // ---------- M4 LOD 分层（技术文档 4.6） ----------
+    /// T0 半径（米）：玩家身边这个距离内的代理完整模拟。
+    #[serde(default = "d_lod_t0_radius")]
+    pub lod_t0_radius: f64,
+    /// T1 半径（米）：T0 之外到这个距离的代理常规模拟。
+    #[serde(default = "d_lod_t1_radius")]
+    pub lod_t1_radius: f64,
+    /// T0 数量上限（超出按距离就近保留，编号兜底）。
+    #[serde(default = "d_lod_t0_cap")]
+    pub lod_t0_cap: usize,
+    /// T1 数量上限。
+    #[serde(default = "d_lod_t1_cap")]
+    pub lod_t1_cap: usize,
+    /// T1 心跳间隔范围（拍）：比 T0 慢（常规居民不必每分钟都想事）。
+    #[serde(default = "d_lod_t1_heartbeat_min")]
+    pub lod_t1_heartbeat_min: u64,
+    #[serde(default = "d_lod_t1_heartbeat_max")]
+    pub lod_t1_heartbeat_max: u64,
+    /// T1 目睹半径缩放：常规居民只留意更近处同伴的遭遇。
+    #[serde(default = "d_lod_t1_witness_scale")]
+    pub lod_t1_witness_scale: f64,
+    /// T2 简化选择的候选数（只保留高权重行为）。
+    #[serde(default = "d_lod_t2_top_k")]
+    pub lod_t2_top_k: usize,
+    /// 朋友亲密值门槛：达到即至少 T1（跨街的朋友仍值得模拟）。
+    #[serde(default = "d_lod_friend_bond")]
+    pub lod_friend_bond: f64,
+    // ---------- M4 习惯自动化（设计稿 4.4） ----------
+    /// 自动化阈值：权重达到基准 × 此值的行为视为已养成习惯
+    /// （自动执行、玩家指令不消耗意志力）。
+    #[serde(default = "d_habit_auto_ratio")]
+    pub habit_auto_ratio: f64,
+    // ---------- M4 负面记忆与暴露恢复（设计稿 4.6） ----------
+    /// 恐惧标记门槛：行为受负面记忆抑制到记忆乘数低于此值时，
+    /// 菜单显示警示、指令额外消耗意志力。
+    #[serde(default = "d_fear_mem_mult")]
+    pub fear_mem_mult: f64,
+    /// 恐惧行为的额外指令成本。
+    #[serde(default = "d_fear_command_cost")]
+    pub fear_command_cost: f64,
+    /// 暴露恢复：完成被负面记忆抑制的行为一次，相关记忆强度 ×此值
+    ///（反复低强度尝试 → 恐惧消退，暴露疗法）；身边有亲近同伴时衰减更快。
+    #[serde(default = "d_exposure_decay")]
+    pub exposure_decay: f64,
+    // ---------- M4 密友（设计稿 4.7） ----------
+    /// 密友亲密值门槛：达到后可查看对方的需求与负面记忆。
+    #[serde(default = "d_close_friend_bond")]
+    pub close_friend_bond: f64,
+    // ---------- M4 限期目标（设计稿 4.5） ----------
+    /// 忍住成本：行为树选中戒断行为、玩家角色靠意志力压住一次的消耗。
+    #[serde(default = "d_goal_resist_cost")]
+    pub goal_resist_cost: f64,
+    /// 违约成本：目标进行期间玩家主动下令戒断行为的额外消耗。
+    #[serde(default = "d_goal_break_cost")]
+    pub goal_break_cost: f64,
+    /// 目标压制倍率：戒断对象的习惯衰减速率 ×此值（对抗使旧习惯加速消退）。
+    #[serde(default = "d_goal_decay_mult")]
+    pub goal_decay_mult: f64,
 }
 
 fn d_room() -> f64 {
@@ -216,6 +274,57 @@ fn d_visit_litter() -> f64 {
 }
 fn d_clean_daily() -> f64 {
     0.35
+}
+fn d_lod_t0_radius() -> f64 {
+    12.0
+}
+fn d_lod_t1_radius() -> f64 {
+    25.0
+}
+fn d_lod_t0_cap() -> usize {
+    128
+}
+fn d_lod_t1_cap() -> usize {
+    512
+}
+fn d_lod_t1_heartbeat_min() -> u64 {
+    5
+}
+fn d_lod_t1_heartbeat_max() -> u64 {
+    30
+}
+fn d_lod_t1_witness_scale() -> f64 {
+    0.5
+}
+fn d_lod_t2_top_k() -> usize {
+    3
+}
+fn d_lod_friend_bond() -> f64 {
+    0.5
+}
+fn d_habit_auto_ratio() -> f64 {
+    1.6
+}
+fn d_fear_mem_mult() -> f64 {
+    0.75
+}
+fn d_fear_command_cost() -> f64 {
+    10.0
+}
+fn d_exposure_decay() -> f64 {
+    0.88
+}
+fn d_close_friend_bond() -> f64 {
+    0.75
+}
+fn d_goal_resist_cost() -> f64 {
+    6.0
+}
+fn d_goal_break_cost() -> f64 {
+    15.0
+}
+fn d_goal_decay_mult() -> f64 {
+    4.0
 }
 
 /// 行为注册表条目：树只引用行为 ID，引擎解释声明执行。
@@ -419,6 +528,28 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
                 return Err(format!("事件 {} 的小时窗口应在 0..24", e.id));
             }
         }
+    }
+    let p = &cfg.params;
+    if p.lod_t0_radius < 0.0 || p.lod_t1_radius < p.lod_t0_radius {
+        return Err("LOD 半径应满足 0 ≤ t0 ≤ t1".into());
+    }
+    if p.lod_t0_cap == 0 || p.lod_t1_cap < p.lod_t0_cap {
+        return Err("LOD 数量上限应满足 0 < t0cap ≤ t1cap".into());
+    }
+    if p.lod_t1_heartbeat_min == 0 || p.lod_t1_heartbeat_max < p.lod_t1_heartbeat_min {
+        return Err("T1 心跳范围非法".into());
+    }
+    if p.lod_t2_top_k == 0 {
+        return Err("T2 候选数应为正".into());
+    }
+    if p.habit_auto_ratio <= 1.0 {
+        return Err("习惯自动化阈值应大于 1（权重超过基准才叫习惯）".into());
+    }
+    if !(0.0..=1.0).contains(&p.exposure_decay) || p.exposure_decay >= 1.0 {
+        return Err("暴露恢复系数应在 0..1（每次尝试衰减一点恐惧）".into());
+    }
+    if p.goal_decay_mult < 1.0 {
+        return Err("目标压制倍率应 ≥ 1".into());
     }
     Ok(())
 }

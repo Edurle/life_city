@@ -159,10 +159,42 @@ fn bench() {
     w.run(30 * 1440);
     let d2 = t0.elapsed();
     let year = d2.as_secs_f64() * 365.0 / 30.0;
+    let prev_decisions = w.decisions_done;
     println!(
         "  30 天耗时 {:.2}s（{} 次决策）→ 外推一年 ≈ {:.1} 分钟（预算 ≤ 5）",
         d2.as_secs_f64(),
         w.decisions_done,
         year / 60.0
+    );
+
+    println!("== 基准 3：LOD 分层（2000 只猫 + 玩家，T0/T1/T2 各司其职） ==");
+    let json = std::fs::read_to_string("assets/cats.json").expect("需要 assets/cats.json");
+    let cfg = load_config(&json).expect("配置应合法");
+    let t0 = Instant::now();
+    let mut w = World::new(cfg, 99, cat_roster(cat_names(2000)), false);
+    w.set_player(0); // 有玩家才启用 LOD；玩家身边 T0，远处降层
+    w.run(30 * 1440);
+    let d3 = t0.elapsed();
+    let year3 = d3.as_secs_f64() * 365.0 / 30.0;
+    let tier_counts = w
+        .agents
+        .iter()
+        .fold([0usize; 3], |mut c, a| {
+            c[a.lod as usize] += 1;
+            c
+        });
+    println!(
+        "  30 天耗时 {:.2}s（{} 次决策，T0={} T1={} T2={}）→ 外推一年 ≈ {:.1} 分钟",
+        d3.as_secs_f64(),
+        w.decisions_done,
+        tier_counts[0],
+        tier_counts[1],
+        tier_counts[2],
+        year3 / 60.0
+    );
+    println!(
+        "  对比基准 2：决策量降到 {:.0}%，耗时 {:.0}%",
+        100.0 * w.decisions_done as f64 / prev_decisions as f64,
+        100.0 * d3.as_secs_f64() / d2.as_secs_f64()
     );
 }

@@ -231,6 +231,34 @@ impl MemoryTable {
         self.cache.clear();
     }
 
+    /// 暴露恢复（M4，设计稿 4.6）：完成一次被负面记忆抑制的行为
+    ///（该记忆对此行为的某个标签给了 <1 的乘数），相关恐惧记忆强度 ×decay。
+    /// encouraged = 身边有亲近同伴（安全感 > 0）：朋友的鼓励让恢复更快（decay²）。
+    /// 返回总消退量（供日志报告"它在慢慢好起来"）。
+    pub fn expose(&mut self, behavior_tags: &[String], decay: f64, encouraged: bool) -> f64 {
+        let factor = if encouraged { decay * decay } else { decay };
+        let mut faded = 0.0;
+        let mut changed = false;
+        for e in &mut self.entries {
+            let suppressed_by_fear = e.valence < 0.0
+                && e.mults
+                    .iter()
+                    .any(|(t, m)| *m < 1.0 && behavior_tags.contains(t));
+            if suppressed_by_fear {
+                let before = e.strength;
+                e.strength *= factor;
+                faded += before - e.strength;
+                changed = true;
+            }
+        }
+        if changed {
+            self.entries.retain(|e| e.strength > 0.02);
+            self.rebuild_index();
+            self.cache.clear();
+        }
+        faded
+    }
+
     /// 重建一级索引（写入、淘汰、覆盖、衰减后调用；结构变化罕见，代价可忽略）。
     fn rebuild_index(&mut self) {
         self.index.clear();
@@ -490,5 +518,57 @@ mod tests {
             *after.get("hide").unwrap() > 1.5,
             "写入后的查询应看到新记忆（缓存已失效）"
         );
+    }
+
+    /// 暴露恢复（M4）：完成被恐惧抑制的行为 → 相关负面记忆消退；
+    /// 鼓励（同伴在身边）加速；被促进的行为与无关记忆不受影响。
+    #[test]
+    fn exposure_fades_fear_on_matching_behavior() {
+        let mut mem = MemoryTable::new(100, 8);
+        mem.write(
+            "rowdy",
+            &tags(&["park", "crowd"]),
+            2,
+            0.9,
+            1.0,
+            -0.8,
+            false,
+            mults(&[("park", 0.4), ("outdoor", 0.7), ("hide", 5.0)]),
+            100,
+        );
+        mem.write(
+            "concert",
+            &tags(&["park"]),
+            2,
+            0.8,
+            1.0,
+            0.7,
+            false,
+            mults(&[("park", 1.8)]),
+            110,
+        );
+        let s_before: Vec<f64> = mem.entries.iter().map(|e| e.strength).collect();
+        // 逛公园（tags 含 park）→ 恐惧记忆消退，正面记忆不动。
+        let faded = mem.expose(
+            &tags(&["park", "outdoor"]),
+            0.88,
+            false,
+        );
+        assert!(faded > 0.01, "应消退部分恐惧：{faded}");
+        let strength_of = |m: &MemoryTable, ev: &str| {
+            m.entries.iter().find(|e| e.event == ev).map(|e| e.strength).unwrap()
+        };
+        assert!(strength_of(&mem, "rowdy") < s_before[0] * 0.9, "恐惧应明显消退");
+        assert!(
+            (strength_of(&mem, "concert") - s_before[1]).abs() < 1e-9,
+            "正面记忆不受影响"
+        );
+        // 与恐惧标签无关的行为不触发暴露。
+        let faded2 = mem.expose(&tags(&["food"]), 0.88, false);
+        assert!(faded2 < 1e-9, "无关行为不应触发暴露");
+        // 鼓励加速：同伴在身边时同一次尝试消退更多。
+        let s2 = strength_of(&mem, "rowdy");
+        mem.expose(&tags(&["park"]), 0.88, true);
+        assert!(strength_of(&mem, "rowdy") < s2 * 0.8, "鼓励应加速恢复");
     }
 }

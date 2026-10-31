@@ -233,12 +233,21 @@ fn player_world(days_run: u64) -> World {
 fn aligned_command_is_cheaper_than_against_one() {
     let mut w = player_world(1);
     let status = w.behaviors_status(0);
-    let avail: Vec<_> = status.iter().filter(|s| s.available).collect();
+    let avail: Vec<_> = status.iter().filter(|s| s.available).cloned().collect();
     assert!(!avail.is_empty());
     let max_cost = avail.iter().map(|s| s.est_cost).fold(f64::MIN, f64::max);
     let min_cost = avail.iter().map(|s| s.est_cost).fold(f64::MAX, f64::min);
-    // 与当前意愿最合拍的行为 5 点，最逆着来的 25 点（公式 5 + 20×(1−比值)）。
-    assert!((min_cost - 5.0).abs() < 0.51, "min {min_cost}");
+    // M4 语义：合拍行为 5 点起步；若一天下来它已把某行为养成自动化习惯
+    //（权重 ≥ 基准×1.6），指令免费（习惯成自然）。最逆着来的仍显著更贵。
+    let cheapest = avail.iter().find(|s| s.est_cost == min_cost).unwrap();
+    if cheapest.automated {
+        assert!(
+            (min_cost - 0.0).abs() < 1e-9,
+            "自动化习惯的指令应免费：{min_cost}"
+        );
+    } else {
+        assert!((min_cost - 5.0).abs() < 0.51, "min {min_cost}");
+    }
     assert!(max_cost > min_cost + 5.0, "max {max_cost} min {min_cost}");
 }
 
@@ -1048,4 +1057,491 @@ fn species_use_different_trees() {
         !cat_behaviors.iter().any(|b| b.as_str() == "watch_tv"),
         "猫不执行人类行为"
     );
+}
+
+// ---------- M4：玩家的人生——LOD、习惯自动化、恐惧恢复、密友、限期目标 ----------
+
+/// M4 测试配置：在 M3 配置上显式给小的 LOD 半径（地图 20×10，
+/// 默认 t1=25 会把全图装进 T1，测不出分层），事件间隔极大值（手动触发）。
+fn m4_config() -> String {
+    m3_config().replace(
+        r#""area_exp_alpha": 0.15, "area_mult_min": 0.35, "area_mult_span": 1.1,
+    "visit_litter": 0.004, "clean_daily": 0.35"#,
+        r#""area_exp_alpha": 0.15, "area_mult_min": 0.35, "area_mult_span": 1.1,
+    "visit_litter": 0.004, "clean_daily": 0.35,
+    "lod_t0_radius": 2.0, "lod_t1_radius": 4.0, "lod_t0_cap": 3, "lod_t1_cap": 3,
+    "habit_auto_ratio": 1.6, "fear_mem_mult": 0.75, "fear_command_cost": 10.0,
+    "exposure_decay": 0.88, "close_friend_bond": 0.75,
+    "goal_resist_cost": 6.0, "goal_break_cost": 15.0, "goal_decay_mult": 4.0"#,
+    )
+}
+
+fn m4_world(seed: u64, humans: usize) -> World {
+    let cfg = load_config(&m4_config()).unwrap();
+    let roster = living_core::human_names(humans)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    let mut w = World::new(cfg, seed, roster, true);
+    w.set_player(0);
+    w.log_meta(seed, 0);
+    w
+}
+
+/// LOD 分配是状态的确定性函数：距离与关系决定层级，同状态两次调用结果一致。
+#[test]
+fn lod_assignment_by_distance_and_bond() {
+    let mut w = m4_world(3, 4);
+    // 玩家在公园草坪 (5,5)；1 号在身边（T0），2 号在中距离（T1），3 号很远（T2）。
+    w.teleport(0, (5.0, 5.0));
+    w.teleport(1, (5.3, 5.0));
+    w.teleport(2, (7.5, 5.0));
+    w.teleport(3, (18.0, 1.0));
+    w.refresh_lod();
+    assert_eq!(w.agent_lod(0), 0, "玩家恒为 T0");
+    assert_eq!(w.agent_lod(1), 0, "身边的居民完整模拟");
+    assert_eq!(w.agent_lod(2), 1, "中距离居民常规模拟");
+    assert_eq!(w.agent_lod(3), 2, "远处居民按天批量结算");
+    // 关系提升层级：3 号是玩家的密友 → 至少 T0（剧情关联者）。
+    w.set_bond(0, 3, 0.9);
+    w.refresh_lod();
+    assert_eq!(w.agent_lod(3), 0, "密友跨街也保持完整模拟");
+    // 确定性：同状态重算，层级不变。
+    let before: Vec<u8> = w.agents.iter().map(|a| a.lod).collect();
+    w.refresh_lod();
+    let after: Vec<u8> = w.agents.iter().map(|a| a.lod).collect();
+    assert_eq!(before, after, "LOD 分配应是状态的确定性函数");
+}
+
+/// 数量上限：T0 超额按 (距离, 编号) 降层，不随结算顺序漂移。
+#[test]
+fn lod_cap_demotes_excess() {
+    let mut w = m4_world(5, 7);
+    w.teleport(0, (5.0, 5.0));
+    for i in 1..7 {
+        w.teleport(i, (5.0 + i as f64 * 0.1, 5.0)); // 全部挤进 T0 半径
+    }
+    w.refresh_lod();
+    let t0 = w.agents.iter().filter(|a| a.lod == 0).count();
+    assert_eq!(t0, 3, "T0 上限 3 = 玩家 + 最近的两位");
+    let t1 = w.agents.iter().filter(|a| a.lod == 1).count();
+    assert_eq!(t1, 3, "T1 上限 3（T0 溢出者按距离取前 3）");
+    assert_eq!(
+        w.agents.iter().filter(|a| a.lod == 2).count(),
+        1,
+        "其余背景"
+    );
+}
+
+/// 降层不丢数据：T2 的岁月都在——升回 T0 时记忆、习惯、关系全保留。
+#[test]
+fn lod_promotion_keeps_history() {
+    let mut w = m4_world(7, 2);
+    w.teleport(0, (0.5, 0.5));
+    w.teleport(1, (19.0, 9.0)); // 远处 → T2
+    w.set_bond(0, 1, 0.6);
+    // T2 的 1 号被事件触及（记忆写入仍然发生——被事件触及其唤醒数据）。
+    w.trigger_env_event(0, (19.0, 9.0));
+    assert!(w.agents[1]
+        .memory
+        .entries
+        .iter()
+        .any(|m| m.event == "park_rowdy"));
+    let mem_n = w.agents[1].memory.entries.len();
+    let w0 = w.agents[1].weights["walk_park"];
+    // 玩家走过去 → 1 号升入 T0。
+    w.teleport(0, (19.2, 9.0));
+    w.refresh_lod();
+    assert_eq!(w.agent_lod(1), 0, "玩家靠近后升层");
+    assert_eq!(w.agents[1].memory.entries.len(), mem_n, "记忆全保留");
+    assert!((w.agents[1].weights["walk_park"] - w0).abs() < 1e-9, "习惯权重保留");
+    assert_eq!(w.bond(0, 1), 0.6, "关系保留");
+}
+
+/// LOD 的性能意义：背景代理不逐拍决策，决策量随 T0/T1 规模而不是总人口走。
+#[test]
+fn lod_background_skips_heartbeat_decisions() {
+    let make = |near: bool| {
+        let mut w = m4_world(11, 8);
+        w.teleport(0, (5.0, 5.0));
+        for i in 1..8 {
+            if near {
+                w.teleport(i, (5.2, 5.2));
+            } else {
+                w.teleport(i, (18.0, 1.0));
+            }
+        }
+        w.refresh_lod();
+        w.decisions_done = 0;
+        w.run(2 * 1440);
+        w
+    };
+    let far = make(false);
+    let near = make(true);
+    let t2_count = far.agents.iter().filter(|a| a.lod == 2).count();
+    assert!(t2_count >= 6, "远处布置应有大量 T2：{t2_count}");
+    println!(
+        "[M4] 两天决策量：背景布置 {} 次 vs 全在身边 {} 次",
+        far.decisions_done, near.decisions_done
+    );
+    assert!(
+        far.decisions_done < near.decisions_done / 3,
+        "背景代理应省下大部分决策：{} vs {}",
+        far.decisions_done,
+        near.decisions_done
+    );
+}
+
+/// T2 按天批量结算：需求保持在活人区间、行为与习惯照常累积（统计近似）。
+#[test]
+fn lod_t2_daily_settle_keeps_agents_alive() {
+    let mut w = m4_world(13, 2);
+    w.teleport(0, (0.5, 0.5));
+    w.teleport(1, (19.0, 9.0));
+    w.refresh_lod();
+    assert_eq!(w.agent_lod(1), 2);
+    w.run(5 * 1440);
+    let a = &w.agents[1];
+    let execs: u64 = a.exec_counts.values().sum();
+    assert!(execs >= 10, "批量结算应累积行为：{execs}");
+    assert!(
+        a.needs.energy > 5.0 && a.needs.hunger > 5.0,
+        "背景代理的需求应保持活人区间：精力 {} 饥饿 {}",
+        a.needs.energy,
+        a.needs.hunger
+    );
+    // 去访留下的痕迹：背景居民也参与地点声誉统计。
+    assert!(w.area_states["home"].visits > 0 || w.area_states["park"].visits > 0);
+}
+
+/// 习惯自动化（设计稿 4.4）：反复执行的行为权重过阈值 → 指令零消耗。
+#[test]
+fn automated_habit_command_is_free() {
+    let mut w = m4_world(17, 1);
+    w.run(60);
+    // 走到白天让时间门放行，再把行为练成习惯（之后不再衰减扰动）。
+    while living_core::time::hour_of(w.tick) < 8 {
+        w.tick();
+    }
+    let base = w.agents[0].base_weights["walk_park"];
+    w.agents[0].weights.insert("walk_park".into(), base * 1.6);
+    w.agents[0].current = None;
+    w.agents[0].next_heartbeat = w.tick + 9999; // 保持空闲，别让它自己先动
+    let status = w.behaviors_status(0);
+    let s = status.iter().find(|s| s.id == "walk_park").unwrap();
+    assert!(s.automated, "权重过阈值应标记为自动化习惯");
+    assert_eq!(s.est_cost, 0.0, "自动化习惯的指令免费");
+    let before = w.agents[0].willpower;
+    let out = w.issue_command(0, "walk_park");
+    assert!(out.accepted, "{:?}", out.reason);
+    assert_eq!(out.cost, 0.0, "执行不应扣意志力");
+    assert_eq!(w.agents[0].willpower, before);
+    w.run(3);
+    assert_eq!(w.agents[0].current.as_ref().unwrap().0, "walk_park");
+}
+
+/// 恐惧标记与暴露恢复（设计稿 4.6）：恐惧行为指令加价并警示；
+/// 反复硬着头皮去做 → 恐惧消退到不再碍事的水平（乘数回门槛以上）。
+#[test]
+fn fear_markup_then_exposure_recovers() {
+    let mut w = m4_world(19, 2);
+    w.collect_recent = true;
+    while living_core::time::hour_of(w.tick) < 9 {
+        w.tick();
+    }
+    // 玩家在草坪遭遇滋事 → 公园行为被负面记忆抑制。
+    w.teleport(0, (5.0, 5.0));
+    w.agents[0].current = None;
+    w.trigger_env_event(0, (5.0, 5.0));
+    let status = w.behaviors_status(0);
+    let s = status
+        .iter()
+        .find(|s| s.id == "walk_park")
+        .cloned()
+        .unwrap();
+    assert!(s.feared, "被恐惧抑制的行为应带警示标记");
+    assert!(
+        s.est_cost >= 15.0,
+        "恐惧行为应显著加价：{}",
+        s.est_cost
+    );
+    let cost_before = s.est_cost;
+    // 暴露恢复：反复下令逛公园（每次完成都硬着头皮）。
+    let mut exposures = 0;
+    for _ in 0..40 {
+        w.agents[0].willpower = 100.0; // 测试聚焦恐惧消退，排除意志力耗尽
+        let out = w.issue_command(0, "walk_park");
+        if out.accepted {
+            w.run(120);
+            exposures += w
+                .recent_events
+                .iter()
+                .filter(|e| matches!(e, living_core::LogEvent::Exposure { .. }))
+                .count();
+        } else {
+            w.run(30);
+        }
+    }
+    println!("[M4] 暴露恢复：{exposures} 次消退事件，加价 {cost_before:.0} → 现价");
+    let status = w.behaviors_status(0);
+    let s = status.iter().find(|s| s.id == "walk_park").cloned().unwrap();
+    assert!(exposures > 0, "反复尝试应产生暴露消退");
+    assert!(
+        !s.feared,
+        "反复尝试后恐惧应退到不再碍事的水平（当前价 {:.0}）",
+        s.est_cost
+    );
+    assert!(s.est_cost < cost_before, "指令应明显变便宜");
+}
+
+/// 密友查看（设计稿 4.7）：亲密值达标才能看见对方的需求与负面记忆。
+#[test]
+fn friend_inspection_gated_by_bond() {
+    let mut w = m4_world(23, 2);
+    w.set_bond(0, 1, 0.5);
+    let err = w.inspect_friend(0, 1).unwrap_err();
+    assert!(err.contains("不够亲近"), "{err}");
+    // 升为密友，并让 1 号带着一条负面记忆。
+    w.set_bond(0, 1, 0.8);
+    w.teleport(1, (5.0, 5.0));
+    w.trigger_env_event(0, (5.0, 5.0));
+    let view = w.inspect_friend(0, 1).unwrap();
+    assert_eq!(view.name, "林雨桐");
+    assert!(view.bond >= 0.75);
+    assert!(
+        !view.fears.is_empty(),
+        "密友应能看到对方正在生效的负面记忆"
+    );
+    assert!(view.fears[0].0.contains("rowdy"));
+    // 密友名单与跨街完整模拟（LOD 的"剧情关联者"）。
+    let friends = w.close_friends(0);
+    assert_eq!(friends.len(), 1, "密友名单只有达标者");
+    w.teleport(1, (19.0, 9.0));
+    w.refresh_lod();
+    assert_eq!(w.agent_lod(1), 0, "密友即使远处也保持 T0");
+}
+
+/// 限期目标完整周期（设计稿 4.5）：设定 → 压制 → 忍住/失守 → 放弃反弹。
+#[test]
+fn goal_resist_suppress_and_rebound() {
+    let mut w = m4_world(29, 1);
+    w.run(60);
+    // 把逛公园练成强习惯（目标对抗的对象）。
+    let base = w.agents[0].base_weights["walk_park"];
+    w.agents[0].weights.insert("walk_park".into(), base * 2.0);
+    w.set_goal(0, "walk_park", 5).unwrap();
+    assert!(!w.goal_status(0).is_empty(), "目标应进行中");
+    let w_start = w.agents[0].weights["walk_park"];
+    // 跑两天：权重被目标压制加速回落（对比自然衰减）。
+    let will_start = w.agents[0].willpower;
+    let mut resists = 0u32;
+    w.collect_recent = true;
+    let before = w.recent_events.len();
+    w.run(2 * 1440);
+    resists = w.recent_events[before..]
+        .iter()
+        .filter(|e| matches!(e, living_core::LogEvent::GoalResist { .. }))
+        .count() as u32;
+    let w_now = w.agents[0].weights["walk_park"];
+    println!(
+        "[M4] 目标压制：权重 {w_start:.2} → {w_now:.2}（基准 {base:.2}），忍住 {resists} 次，意志 {will_start:.0} → {:.0}",
+        w.agents[0].willpower
+    );
+    assert!(
+        w_now < w_start * 0.9,
+        "目标期间习惯权重应被加速压制：{w_start:.2} -> {w_now:.2}"
+    );
+    let st = &w.goal_status(0)[0];
+    assert!(st.suppressed > 0.0, "应记录被压制的量");
+    if resists == 0 {
+        // 行为树这两天没选它也可能（时间门/需求门），但压制与反弹仍须成立。
+        println!("[M4]（这两天树没有选中戒断对象，无忍住事件）");
+    }
+    // 中途放弃 → 旧习惯立刻反弹。
+    let (behavior, rebound) = w.abandon_goal(0, "walk_park").unwrap();
+    assert_eq!(behavior, "walk_park");
+    assert!(rebound > 0.0, "放弃应触发反弹：{rebound}");
+    let w_after = w.agents[0].weights["walk_park"];
+    assert!(
+        w_after > w_now,
+        "反弹后权重应回升：{w_now:.2} -> {w_after:.2}"
+    );
+    assert!(w.goal_status(0).is_empty(), "目标已结束");
+    // 放弃后再设同一行为的目标应允许。
+    w.set_goal(0, "walk_park", 2).unwrap();
+}
+
+/// 目标到期：零违约成功（压制已转化为自然衰减）；主动违约会计数。
+#[test]
+fn goal_deadline_success_and_commanded_violation() {
+    let mut w = m4_world(31, 1);
+    w.run(60);
+    // 选一个夜里做不了的行为设 1 天目标（白天树也未必选它），
+    // 到期零违约 → GoalEnd success。
+    w.set_goal(0, "bench_sit", 1).unwrap();
+    // 主动违约一次：把意志力灌满后下令（时间门内才能下令）。
+    while living_core::time::hour_of(w.tick) < 8 {
+        w.tick();
+    }
+    w.agents[0].willpower = 100.0;
+    w.collect_recent = true;
+    let before = w.recent_events.len();
+    let out = w.issue_command(0, "bench_sit");
+    assert!(out.accepted, "{:?}", out.reason);
+    assert!(
+        w.recent_events[before..].iter().any(|e| matches!(
+            e,
+            living_core::LogEvent::GoalViolation { commanded: true, .. }
+        )),
+        "主动下令戒断行为应记违约"
+    );
+    let st = &w.goal_status(0)[0];
+    assert_eq!(st.violations, 1);
+    // 跑过期限 → 目标结束（有违约 → 不算成功）。
+    w.run(26 * 60);
+    assert!(w.goal_status(0).is_empty(), "到期后目标应结束");
+    assert!(w.recent_events.iter().any(|e| matches!(
+        e,
+        living_core::LogEvent::GoalEnd { success: false, abandoned: false, .. }
+    )));
+}
+
+/// M4 验收故事（用真实内容 street.json）：反复下令逛公园 → 养成自动化习惯
+/// 且系统能报告原因；随后设目标对抗 → 压制与忍住可见；放弃 → 反弹；
+/// 遭遇滋事后习惯报告能把经历关联进来。解释与数据一致。
+#[test]
+fn m4_acceptance_habit_story() {
+    let json = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../assets/street.json"
+    ))
+    .expect("需要 assets/street.json");
+    let cfg = load_config(&json).unwrap();
+    let roster = living_core::human_names(3)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    let mut w = World::new(cfg, 37, roster, true);
+    w.set_player(0);
+    w.collect_recent = true;
+    // 三天里玩家坚持每天白天都去逛公园（可用就下令）。
+    for _ in 0..3 * 1440 {
+        if w.agents[0].current.is_none() {
+            let ok = w.issue_command(0, "walk_park");
+            if !ok.accepted {
+                w.agents[0].willpower = 100.0; // 睡醒回满，排除意志力噪声
+            }
+        }
+        w.tick();
+    }
+    let report = w.habit_report(0);
+    let walk = report.iter().find(|r| r.behavior == "walk_park").unwrap();
+    println!(
+        "[M4 验收] 逛公园：权重 {:.2}（基准 {:.2}，×{:.2}），执行 {} 次，自动化 {}",
+        walk.weight, walk.base, walk.ratio, walk.execs, walk.automated
+    );
+    assert!(walk.execs >= 5, "三天坚持应多次执行：{}", walk.execs);
+    assert!(
+        walk.automated,
+        "三天反复执行应养成自动化习惯（当前 ×{:.2}）",
+        walk.ratio
+    );
+    // 习惯报告能给出解释（相关记忆或执行史），与模拟数据一致。
+    let status = w.behaviors_status(0);
+    let s = status.iter().find(|s| s.id == "walk_park").cloned().unwrap();
+    assert!(s.automated && s.est_cost == 0.0);
+    // 对抗：给逛公园设 3 天目标，期间树选中时玩家角色要靠意志力忍。
+    w.set_goal(0, "walk_park", 3).unwrap();
+    let w0 = w.agents[0].weights["walk_park"];
+    let log_len_before = w.logger.buf.lines().count();
+    w.run(2 * 1440);
+    // 从完整日志计数（recent_events 是 512 条的环形缓冲，长跑下切片不可靠）。
+    let tail: Vec<&str> = w.logger.buf.lines().skip(log_len_before).collect();
+    let resists = tail
+        .iter()
+        .filter(|l| l.contains(r#""t":"goal_resist""#))
+        .count();
+    let broke = tail
+        .iter()
+        .filter(|l| l.contains(r#""t":"goal_violation""#))
+        .count();
+    let w1 = w.agents[0].weights["walk_park"];
+    let st = &w.goal_status(0)[0];
+    println!(
+        "[M4 验收] 目标对抗两天：权重 {w0:.2} → {w1:.2}（基准 {:.2}），忍住 {} 次、失守 {} 次",
+        walk.base, resists, broke
+    );
+    assert!(w1 < w0, "目标期间习惯应被压制");
+    assert!(resists >= 1, "强习惯被树选中时应出现忍住事件：{resists}");
+    assert_eq!(st.resists as usize, resists, "目标计数与日志一致");
+    // 放弃 → 反弹，完整闭环。
+    let (_, rebound) = w.abandon_goal(0, "walk_park").unwrap();
+    let w2 = w.agents[0].weights["walk_park"];
+    println!("[M4 验收] 放弃目标：反弹 +{rebound:.2} → {w2:.2}");
+    assert!(w2 > w1, "放弃后旧习惯应立刻反弹");
+    // 最后一段经历：白天在草坪遭遇滋事——习惯报告能把这段经历关联进来
+    //（"养成某习惯，因为某经历"的解释与模拟数据一致）。
+    // 清空记忆排除之前随机事件的干扰，聚焦这一次经历的效果。
+    while living_core::time::hour_of(w.tick) != 10 {
+        w.tick();
+    }
+    w.agents[0].memory = living_core::memory::MemoryTable::new(500, 8);
+    w.teleport(0, (5.0, 5.0));
+    w.agents[0].current = None;
+    w.trigger_env_event(0, (5.0, 5.0));
+    let report = w.habit_report(0);
+    let walk = report.iter().find(|r| r.behavior == "walk_park").unwrap();
+    assert!(
+        walk.related_memories.iter().any(|m| m.contains("rowdy")),
+        "习惯报告应能关联到相关经历：{:?}",
+        walk.related_memories
+    );
+    let status = w.behaviors_status(0);
+    let s = status.iter().find(|s| s.id == "walk_park").cloned().unwrap();
+    assert!(s.feared, "遭遇滋事后逛公园应带恐惧警示");
+}
+
+/// M4 存档回环：目标与 LOD 进快照，读档后运行与连续运行一致。
+#[test]
+fn save_load_m4_roundtrip() {
+    let json = m4_config();
+    let cfg = load_config(&json).unwrap();
+    let mut a = World::new(cfg.clone(), 41, living_core::human_names(3)
+        .into_iter().map(|n| (n, "human".to_string())).collect(), true);
+    a.set_player(0);
+    a.run(900);
+    a.set_goal(0, "walk_park", 2).unwrap();
+    a.teleport(2, (19.0, 9.0)); // 2 号进入 T2
+    a.run(300);
+    let bytes = a.to_save();
+    let offset = a.logger.buf.len();
+    a.run(1440);
+    let mut b = World::from_save(load_config(&json).unwrap(), &bytes).unwrap();
+    assert_eq!(b.goal_status(0).len(), 1, "目标应进快照");
+    assert_eq!(b.agent_lod(2), 2, "LOD 层级应进快照");
+    b.run(1440);
+    assert_eq!(
+        b.logger.buf,
+        a.logger.buf[offset..],
+        "读档继续的日志应与连续运行一致"
+    );
+}
+
+/// 含目标操作的回放确定性。
+#[test]
+fn m4_script_replay_deterministic() {
+    let script = |w: &mut World| {
+        w.run(600);
+        w.set_goal(0, "walk_park", 2).unwrap();
+        w.run(500);
+        let _ = w.issue_command(0, "walk_park");
+        w.run(300);
+        let _ = w.abandon_goal(0, "walk_park");
+        w.run(400);
+    };
+    let mut a = m4_world(43, 2);
+    script(&mut a);
+    let mut b = m4_world(43, 2);
+    script(&mut b);
+    assert_eq!(a.logger.buf, b.logger.buf, "含目标操作的运行应字节级一致");
 }

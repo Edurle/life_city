@@ -2,6 +2,7 @@
 //! 需求、记忆表、独立随机数子流与当前动作。
 
 use crate::config::Params;
+use crate::goal::Goal;
 use crate::memory::MemoryTable;
 use crate::needs::Needs;
 use crate::rng::{derive_seed, Rng, WorldSeed};
@@ -15,6 +16,10 @@ pub const STREAM_INDIVIDUAL: u8 = 1;
 
 fn d_species_cat() -> String {
     "cat".to_string()
+}
+
+fn d_lod() -> u8 {
+    0
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -40,6 +45,13 @@ pub struct Agent {
     pub memory: MemoryTable,
     /// 当前动作：(行为 ID, 开始拍, 结束拍)。
     pub current: Option<(String, Tick, Tick)>,
+    /// LOD 层级（M4，技术文档 4.6）：0 = T0 完整，1 = T1 常规，2 = T2 背景。
+    /// 世界状态的确定性函数（见 world::refresh_lod），不进随机数。
+    #[serde(default = "d_lod")]
+    pub lod: u8,
+    /// 进行中的限期目标（M4，设计稿 4.5；通常只有玩家角色有）。
+    #[serde(default)]
+    pub goals: Vec<Goal>,
     /// 位置（米）：当前行为地点；行为开始时移动过去，空闲时留在原地。
     pub pos: Pos,
     /// 下次心跳拍（空闲时重新决策）。
@@ -80,6 +92,8 @@ impl Agent {
             base_weights,
             memory: MemoryTable::new(params.memory_cap, params.memory_top_k),
             current: None,
+            lod: 0,
+            goals: Vec::new(),
             pos: (params.map_width / 2.0, params.map_height / 2.0),
             next_heartbeat: rng_ind.uniform_int(1, params.heartbeat_max),
             exec_counts: BTreeMap::new(),
@@ -106,6 +120,63 @@ impl Agent {
 
     pub fn record_exec(&mut self, behavior: &str) {
         *self.exec_counts.entry(behavior.to_string()).or_insert(0) += 1;
+    }
+
+    /// 习惯自动化（M4，设计稿 4.4）：权重达到基准 × 阈值的行为视为已养成——
+    /// 行为树自然高频选择它；玩家指令它不再消耗意志力（习惯成自然）。
+    pub fn is_automated(&self, behavior: &str, auto_ratio: f64) -> bool {
+        match (
+            self.weights.get(behavior),
+            self.base_weights.get(behavior),
+        ) {
+            (Some(w), Some(base)) => *w >= *base * auto_ratio,
+            _ => false,
+        }
+    }
+
+    /// 当前拍活跃、且针对指定行为的戒断目标（决策与指令定价用）。
+    pub fn active_goal_on(&self, behavior: &str, tick: Tick) -> Option<&Goal> {
+        self.goals
+            .iter()
+            .find(|g| g.behavior == behavior && g.is_active(tick))
+    }
+
+    /// 活跃目标的下标（需要递增计数时用）。
+    pub fn active_goal_idx(&self, behavior: &str, tick: Tick) -> Option<usize> {
+        self.goals
+            .iter()
+            .position(|g| g.behavior == behavior && g.is_active(tick))
+    }
+
+    /// 目标压制（每小时调用一次）：戒断对象的习惯衰减加速 `mult` 倍，
+    /// 相对自然衰减多压掉的部分记入 goal.suppressed（放弃时回升）。
+    pub fn goal_hourly_suppress(&mut self, hourly_rate: f64, mult: f64) {
+        let f = 1.0 - (-hourly_rate).exp();
+        let fg = 1.0 - (-(hourly_rate * mult)).exp();
+        let goals = &mut self.goals;
+        let weights = &mut self.weights;
+        let bases = &self.base_weights;
+        for g in goals.iter_mut() {
+            let (Some(w), Some(base)) = (weights.get_mut(&g.behavior), bases.get(&g.behavior))
+            else {
+                continue;
+            };
+            let normal = *w + (*base - *w) * f;
+            let boosted = *w + (*base - *w) * fg;
+            g.suppressed += normal - boosted;
+            *w = boosted;
+        }
+    }
+
+    /// 放弃目标：suppressed 一次性还回权重（旧习惯反弹，设计稿 4.5）。
+    /// 返回还回了多少。
+    pub fn goal_rebound(&mut self, gi: usize) -> f64 {
+        let g = &self.goals[gi];
+        let back = g.suppressed.max(0.0);
+        if let Some(w) = self.weights.get_mut(&g.behavior) {
+            *w += back;
+        }
+        back
     }
 
     /// 正在执行的行为是否带有指定标签（环境事件的免疫判定）。
