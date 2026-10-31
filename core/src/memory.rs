@@ -10,16 +10,24 @@ use std::collections::BTreeMap;
 
 /// 间接记忆（目睹）的事件名前缀。
 pub const VICARIOUS_PREFIX: &str = "目睹:";
+/// 传闻（M5，社交分享）的事件名前缀——与目睹同槽竞争，不叠加放大。
+pub const HEARSAY_PREFIX: &str = "传闻:";
 
-/// 事件的基础名（去掉目睹前缀）：同一基础事件在同一时段的记忆相互竞争，
+/// 事件的基础名（去掉目睹/传闻前缀）：同一基础事件在同一时段的记忆相互竞争，
 /// 直接经历与传闻不叠加——亲历更强时覆盖传闻，反之传闻保留。
 pub fn base_event(e: &str) -> &str {
-    e.strip_prefix(VICARIOUS_PREFIX).unwrap_or(e)
+    let b = e.strip_prefix(HEARSAY_PREFIX).unwrap_or(e);
+    b.strip_prefix(VICARIOUS_PREFIX).unwrap_or(b)
 }
 
 /// 构造目睹版事件名（模仿节点写入用）。
 pub fn vicarious_event(id: &str) -> String {
     format!("{VICARIOUS_PREFIX}{id}")
+}
+
+/// 构造传闻版事件名（社交分享写入用，M5）。
+pub fn hearsay_event(id: &str) -> String {
+    format!("{HEARSAY_PREFIX}{}", base_event(id))
 }
 
 /// 记忆条目。键 = (事件类型, 事件特征标签, 时段)，值 = 对行为标签的权重乘数。
@@ -38,6 +46,10 @@ pub struct MemoryEntry {
     /// 对行为标签的乘数（>1 促进，<1 抑制）。
     pub mults: BTreeMap<String, f64>,
     pub tick: Tick,
+    /// 关于某个人的记忆（M5）：受害者记住小偷、警察记住惯犯——
+    /// 社交对象选择（M5 二阶段）与密友查看的底座。
+    #[serde(default)]
+    pub person: Option<u32>,
 }
 
 /// 一级检索的桶键：记忆按（时段、每个标签）入桶，查询取各键桶的并集为候选。
@@ -129,6 +141,7 @@ impl MemoryTable {
                 vicarious,
                 mults,
                 tick,
+                person: None,
             });
             // 淘汰最弱者
             if self.entries.len() > self.cap {
@@ -229,6 +242,15 @@ impl MemoryTable {
         self.entries.retain(|e| e.strength > 0.02);
         self.rebuild_index();
         self.cache.clear();
+    }
+
+    /// 给已有条目标注"关于某人"（案发后受害者记住小偷等）。
+    pub fn set_person(&mut self, base_event_name: &str, quarter: u8, person: u32) {
+        if let Some(e) = self.entries.iter_mut().find(|e| {
+            base_event(&e.event) == base_event_name && e.quarter == quarter
+        }) {
+            e.person = Some(person);
+        }
     }
 
     /// 暴露恢复（M4，设计稿 4.6）：完成一次被负面记忆抑制的行为

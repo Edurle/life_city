@@ -26,7 +26,7 @@ pub struct SaveState {
     pub decisions_done: u64,
 }
 
-pub const SAVE_VERSION: u32 = 4;
+pub const SAVE_VERSION: u32 = 5;
 
 impl World {
     /// 导出二进制快照。
@@ -80,6 +80,7 @@ impl World {
             decisions_done: state.decisions_done,
             collect_recent: false,
             recent_events: Vec::new(),
+            stats: crate::world::TownStats::default(),
         })
     }
 }

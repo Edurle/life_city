@@ -22,6 +22,10 @@ pub struct SimConfig {
     /// 职业、日常作息等通用结构定义一次、多树复用，不复制粘贴。
     #[serde(default)]
     pub subtrees: BTreeMap<String, TreeNode>,
+    /// 职业（M5，设计稿 5.3）：全部由数据定义，引擎无职业专属代码。
+    /// 面包师与小偷走同一格式，只是取值不同。
+    #[serde(default)]
+    pub jobs: Vec<JobDef>,
     pub spots: Vec<SpotDef>,
     /// 地点（M3）：区域定义——街道地图上的矩形，声誉与整洁度的载体。
     #[serde(default)]
@@ -61,6 +65,7 @@ fn collect_actions(
         TreeNode::Gate { child, .. } | TreeNode::TimeGate { child, .. } => {
             collect_actions(child, subtrees, out)
         }
+        TreeNode::JobGate { child, .. } => collect_actions(child, subtrees, out),
         TreeNode::Subtree { tree_ref } => {
             if let Some(sub) = subtrees.get(tree_ref) {
                 collect_actions(sub, subtrees, out);
@@ -72,6 +77,65 @@ fn collect_actions(
             }
         }
     }
+}
+
+/// 职业定义（M5，设计稿 5.3 的统一格式）。面包师与小偷只有取值差异：
+/// 时间表写在行为树的 JobGate + 时间门里；技能字段暂占位不启用。
+#[derive(Debug, Clone, Deserialize)]
+pub struct JobDef {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 对应的上班行为 ID（完成一次 = 一个班次，工资入账）。
+    pub work_behavior: String,
+    /// 每班次工资；非法职业为 0（收入来自 crime 规格的赃款）。
+    #[serde(default)]
+    pub salary: f64,
+    /// 岗位数；0 = 无门槛不限量（非法职业）。
+    #[serde(default)]
+    pub slots: usize,
+    /// 转行评估的基准权重。
+    #[serde(default = "d_one")]
+    pub switch_weight: f64,
+    /// 诚实度斜率（-2..2）：正 = 诚实者更倾向此行；小偷为负。
+    #[serde(default)]
+    pub honesty_bias: f64,
+    /// 入职条件（设计稿 5.3 门槛字段；技能门槛暂缓）：
+    /// 诚实度须低于此值（非法行当的自筛）。
+    #[serde(default)]
+    pub require_honesty_below: Option<f64>,
+    /// 经济压力须高于此值（走投无路才铤而走险）。
+    #[serde(default)]
+    pub require_pressure_above: Option<f64>,
+}
+
+impl JobDef {
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.id)
+    }
+}
+
+/// 犯罪规格（M5，设计稿 5.2）：挂在行为上，引擎按通用规则结算——
+/// 作案挑附近有钱者、转移钱包、按环境（照明/巡逻/人流）掷被抓。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CrimeSpec {
+    /// 单次作案上限（实际为受害者钱包的一定比例）。
+    pub max_take: f64,
+    /// 基础被抓概率（乘以环境的照明、巡逻、人流修正）。
+    pub caught_base: f64,
+    /// 被抓后的社区服务行为 ID（公开劳动，归还财物之外的正经代价）。
+    pub service_behavior: String,
+    /// 受害者写入的记忆事件名（数据驱动，如"被偷"）。
+    #[serde(default = "d_victim_event")]
+    pub victim_event: String,
+    /// 受害者记忆的强度与效价（强烈负面）。
+    #[serde(default = "d_victim_intensity")]
+    pub victim_intensity: f64,
+    #[serde(default = "d_victim_valence")]
+    pub victim_valence: f64,
+    /// 受害者记忆对行为标签的乘数（对夜间外出等行为的抑制）。
+    #[serde(default)]
+    pub victim_mults: BTreeMap<String, f64>,
 }
 
 /// 地点（区域）：街道地图上的矩形。承载声誉（访客情绪累计）与整洁度（客观状态）。
@@ -94,6 +158,10 @@ pub struct AreaDef {
     /// 脏乱系数：公共场所到访留脏（1.0），自家用场所磨损极小（如 0.1）。
     #[serde(default = "d_one")]
     pub litter_scale: f64,
+    /// 照明（0..1，静态环境参数，M5）：越高越难作案——
+    /// "环境永久影响概率"最直观的展示项之一。
+    #[serde(default = "d_lighting")]
+    pub lighting: f64,
 }
 
 impl AreaDef {
@@ -238,6 +306,14 @@ pub struct Params {
     /// 目标压制倍率：戒断对象的习惯衰减速率 ×此值（对抗使旧习惯加速消退）。
     #[serde(default = "d_goal_decay_mult")]
     pub goal_decay_mult: f64,
+    // ---------- M5：经济 ----------
+    /// 贫困线（M5）：钱包低于此值产生经济压力（线性，见底 = 1）。
+    /// 压力进入带 pressure_bias 的行为权重与职业转行评估。
+    #[serde(default = "d_poverty_line")]
+    pub poverty_line: f64,
+    /// 每日生活费（M5，房租水电的抽象）：日界统一扣减。0 = 无此机制。
+    #[serde(default)]
+    pub daily_upkeep: f64,
 }
 
 fn d_room() -> f64 {
@@ -339,6 +415,21 @@ fn d_goal_break_cost() -> f64 {
 fn d_goal_decay_mult() -> f64 {
     4.0
 }
+fn d_poverty_line() -> f64 {
+    300.0
+}
+fn d_lighting() -> f64 {
+    0.5
+}
+fn d_victim_event() -> String {
+    "被偷".to_string()
+}
+fn d_victim_intensity() -> f64 {
+    0.8
+}
+fn d_victim_valence() -> f64 {
+    -0.8
+}
 
 /// 行为注册表条目：树只引用行为 ID，引擎解释声明执行。
 #[derive(Debug, Clone, Deserialize)]
@@ -362,6 +453,27 @@ pub struct BehaviorDef {
     /// 需求门（第二层硬门槛）：需求低于 below 才可用。
     pub gate_need: Option<String>,
     pub gate_below: Option<f64>,
+    // ---------- M5：经济与治安的通用旋钮 ----------
+    /// 价格（M5 经济）：钱包付不起时该行为不可用（资源门槛）。
+    #[serde(default)]
+    pub cost: f64,
+    /// 诚实度斜率（-2..2）：权重 × (1 + bias×(诚实度−0.5)×2)。犯罪的负斜率 =
+    /// 越不诚实越想作案（人格轴进入行为权重，设计稿 5.2）。
+    #[serde(default)]
+    pub honesty_bias: f64,
+    /// 经济压力斜率（≥0）：权重 × (1 + bias×压力)。压力 = 钱包见底程度——
+    /// 穷则思变（设计稿 5.2 经济压力项的通用化）。
+    #[serde(default)]
+    pub pressure_bias: f64,
+    /// 完成时让所在区域整洁度恢复的量（清洁/社区服务行为）。
+    #[serde(default)]
+    pub clean_effect: f64,
+    /// 完成时让所在区域巡逻度上升的量（警察巡逻；巡逻度进被抓概率）。
+    #[serde(default)]
+    pub patrol_boost: f64,
+    /// 犯罪规格（M5 治安）：完成时按通用规则结算作案与被抓。
+    #[serde(default)]
+    pub crime: Option<CrimeSpec>,
 }
 
 impl BehaviorDef {
@@ -412,6 +524,12 @@ pub enum TreeNode {
     Subtree {
         #[serde(rename = "ref")]
         tree_ref: String,
+    },
+    /// 职业门（M5，设计稿 5.3）：只有当前职业为该值的代理放行子树。
+    /// 工作行为按职业分支挂在人类树上，转行 = 换一门放行。
+    JobGate {
+        job: String,
+        child: Box<TreeNode>,
     },
     Action {
         behavior: String,
@@ -508,13 +626,48 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
             }
         }
     }
-    validate_tree(&cfg.tree, &behavior_ids, &cfg.subtrees, &mut Vec::new())?;
+    // 职业（M5）：工作行为必须存在；岗位工资非负。
+    let job_ids: Vec<&str> = cfg.jobs.iter().map(|j| j.id.as_str()).collect();
+    let mut seen_work = std::collections::BTreeSet::new();
+    for j in &cfg.jobs {
+        if !behavior_ids.contains(&j.work_behavior.as_str()) {
+            return Err(format!("职业 {} 的工作行为 {} 未注册", j.id, j.work_behavior));
+        }
+        if seen_work.contains(&j.work_behavior) {
+            return Err(format!("行为 {} 被多个职业用作工作行为", j.work_behavior));
+        }
+        seen_work.insert(j.work_behavior.clone());
+        if j.salary < 0.0 {
+            return Err(format!("职业 {} 的工资不应为负", j.id));
+        }
+        if cfg.jobs.iter().filter(|x| x.id == j.id).count() > 1 {
+            return Err(format!("职业 {} 重复定义", j.id));
+        }
+    }
+    // 犯罪规格：社区服务行为必须存在。
+    for b in &cfg.behaviors {
+        if let Some(c) = &b.crime {
+            if !behavior_ids.contains(&c.service_behavior.as_str()) {
+                return Err(format!(
+                    "行为 {} 的犯罪规格引用了未注册的社区服务行为 {}",
+                    b.id, c.service_behavior
+                ));
+            }
+            if !(0.0..=1.0).contains(&c.caught_base) {
+                return Err(format!("行为 {} 的基础被抓概率应在 0..1", b.id));
+            }
+        }
+        if b.cost < 0.0 {
+            return Err(format!("行为 {} 的价格不应为负", b.id));
+        }
+    }
+    validate_tree(&cfg.tree, &behavior_ids, &job_ids, &cfg.subtrees, &mut Vec::new())?;
     for (species, tree) in &cfg.trees {
-        validate_tree(tree, &behavior_ids, &cfg.subtrees, &mut Vec::new())
+        validate_tree(tree, &behavior_ids, &job_ids, &cfg.subtrees, &mut Vec::new())
             .map_err(|e| format!("物种 {species} 的树：{e}"))?;
     }
     for (name, tree) in &cfg.subtrees {
-        validate_tree(tree, &behavior_ids, &cfg.subtrees, &mut Vec::new())
+        validate_tree(tree, &behavior_ids, &job_ids, &cfg.subtrees, &mut Vec::new())
             .map_err(|e| format!("子树 {name}：{e}"))?;
     }
     for s in &cfg.spots {
@@ -582,18 +735,25 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
 fn validate_tree(
     node: &TreeNode,
     ids: &[&str],
+    job_ids: &[&str],
     subtrees: &BTreeMap<String, TreeNode>,
     visiting: &mut Vec<String>,
 ) -> Result<(), String> {
     match node {
         TreeNode::Selector { children } => {
             for c in children {
-                validate_tree(c, ids, subtrees, visiting)?;
+                validate_tree(c, ids, job_ids, subtrees, visiting)?;
             }
             Ok(())
         }
         TreeNode::Gate { child, .. } | TreeNode::TimeGate { child, .. } => {
-            validate_tree(child, ids, subtrees, visiting)
+            validate_tree(child, ids, job_ids, subtrees, visiting)
+        }
+        TreeNode::JobGate { job, child } => {
+            if !job_ids.iter().any(|j| j == job) {
+                return Err(format!("职业门引用了未定义的职业 {job}"));
+            }
+            validate_tree(child, ids, job_ids, subtrees, visiting)
         }
         TreeNode::Subtree { tree_ref } => {
             if !subtrees.contains_key(tree_ref) {
@@ -603,7 +763,7 @@ fn validate_tree(
                 return Err(format!("子树 {tree_ref} 出现循环引用"));
             }
             visiting.push(tree_ref.clone());
-            let r = validate_tree(&subtrees[tree_ref], ids, subtrees, visiting);
+            let r = validate_tree(&subtrees[tree_ref], ids, job_ids, subtrees, visiting);
             visiting.pop();
             r
         }

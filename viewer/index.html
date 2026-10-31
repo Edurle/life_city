@@ -2,7 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>《活城》M4 日志回放查看器</title>
+<title>《活城》M5 日志回放查看器</title>
 <style>
   :root { --bg:#1b1e24; --panel:#242830; --line:#3a3f4b; --text:#d8dce4; --dim:#8a91a0; --accent:#7aa2f7; }
   * { box-sizing:border-box; }
@@ -38,7 +38,7 @@
 </head>
 <body>
 <header>
-  <h1>《活城》M4 · 日志回放查看器</h1>
+  <h1>《活城》M5 · 日志回放查看器</h1>
   <label id="drop">拖入 .jsonl 日志文件，或点击选择<input id="file" type="file" accept=".jsonl" hidden></label>
   <span id="meta"></span>
 </header>
@@ -77,6 +77,7 @@ function parseLog(text) {
     if (ev.t === "goal_set" || ev.t === "goal_resist" || ev.t === "goal_violation" || ev.t === "goal_end") {
       m4Events.push(ev); A(agents, ev.agent).goalEvents.push(ev); continue;
     }
+    if (ev.t === "theft" || ev.t === "job_change") { m4Events.push(ev); continue; }
     if (ev.t === "exposure") { m4Events.push(ev); A(agents, ev.agent).exposures.push(ev); continue; }
     if (ev.t === "snapshot") {
       A(agents, ev.agent).snapshots.push(ev); continue;
@@ -159,13 +160,14 @@ function render() {
     <div class="card" style="flex:1;min-width:420px"><h3>六项需求</h3><canvas id="needsC" width="620" height="220"></canvas>
       <div class="legend">${Object.keys(NEED_LABELS).map((k,i)=>`<span><i class="sw" style="background:${COLORS[i]}"></i>${NEED_LABELS[k]}</span>`).join("")}</div></div>
     <div class="card" style="flex:1;min-width:420px"><h3>行为权重（含习惯累积，随经历漂移）</h3><canvas id="weightsC" width="620" height="220"></canvas><div class="legend" id="wLegend"></div></div>
+    <div class="card" style="flex:1;min-width:420px"><h3>钱包（工资 · 消费 · 赃款）</h3><canvas id="walletC" width="620" height="220"></canvas><div class="legend"><span><i class="sw" style="background:#ff9e64"></i>钱包</span></div></div>
   </div>
   <div class="row">
     <div class="card" style="flex:1;min-width:360px"><h3>行为占比（全部决策）</h3><canvas id="distC" width="620" height="240"></canvas></div>
     <div class="card" style="flex:1;min-width:360px"><h3>记忆写入（按显著性排序）</h3><div id="memlist"></div></div>
   </div>
   <div class="row">
-    <div class="card" style="flex:1;min-width:360px"><h3>街道动态（环境事件 · 惊吓 · 亲密 · 目标对抗 · 暴露恢复，最近 40 条）</h3><div id="groupFeed"></div></div>
+    <div class="card" style="flex:1;min-width:360px"><h3>街道动态（环境 · 惊吓 · 亲密 · 目标 · 暴露 · 案发 · 职业，最近 40 条）</h3><div id="groupFeed"></div></div>
     <div class="card" style="flex:1;min-width:360px"><h3>亲近关系（模拟结束时）</h3><div id="bondList"></div></div>
   </div>
   <div class="card"><h3>地点声誉与整洁度（每小时快照）</h3><canvas id="areaC" width="1240" height="200"></canvas><div class="legend" id="areaLegend"></div></div>
@@ -193,16 +195,24 @@ function updateReadout() {
   if (!snap) { el.innerHTML = "<span class='hint'>无快照</span>"; return; }
   const needs = Object.entries(snap.needs).map(([k,v]) => `${NEED_LABELS[k]} ${v.toFixed(0)}`).join(" · ");
   const will = snap.willpower != null ? ` · 意志 ${snap.willpower.toFixed(0)}` : "";
+  const money = snap.wallet != null ? ` · 💰${snap.wallet.toFixed(0)}` : "";
   const lod = snap.lod != null ? ` · LOD ${["T0 完整","T1 常规","T2 背景"][snap.lod] || snap.lod}` : "";
-  el.innerHTML = `<span><b>${fmtTick(snap.tick)}</b></span><span>${needs}${will}</span><span>记忆 ${snap.memories} 条${lod}</span>`;
+  el.innerHTML = `<span><b>${fmtTick(snap.tick)}</b></span><span>${needs}${will}${money}</span><span>记忆 ${snap.memories} 条${lod}</span>`;
 }
 
 function drawCharts(ag) {
   // 需求曲线（意志力若存在则一并画出，黄色虚线色）
   const needKeys = Object.keys(NEED_LABELS);
   const hasWill = ag.snapshots.some(s => s.willpower != null);
+  const hasWallet = ag.snapshots.some(s => s.wallet != null);
   const series = needKeys.map((k,i)=>({name:k,color:COLORS[i],data:ag.snapshots.map(s=>s.needs[k])}));
   if (hasWill) series.push({name:"willpower",color:"#e0af68",data:ag.snapshots.map(s=>s.willpower)});
+  // 钱包单独一档量纲（可远超 100），画成独立卡片更清楚——放进度数右侧。
+  if (hasWallet) {
+    lineChart(document.getElementById("walletC"),
+      [{name:"wallet",color:"#ff9e64",data:ag.snapshots.map(s=>s.wallet)}],
+      {marker:scrubIdx});
+  }
   lineChart(document.getElementById("needsC"), series, {maxY:100, marker:scrubIdx});
   document.querySelector("#needsC").closest(".card").querySelector(".legend").innerHTML =
     needKeys.map((k,i)=>`<span><i class="sw" style="background:${COLORS[i]}"></i>${NEED_LABELS[k]}</span>`).join("") +
@@ -266,6 +276,10 @@ function renderGroupFeed() {
     else if (g.t === "goal_violation") html = `🎯 ${who} 的【${g.behavior}】失守（${g.commanded ? "主动违约" : "没忍住"}）`;
     else if (g.t === "goal_end") html = `🎯 ${who} 的【${g.behavior}】目标结束：${g.abandoned ? `放弃，反弹 +${g.rebound.toFixed(1)}` : (g.success ? "成功" : `到期，失守 ${g.violations} 次`)}（忍住 ${g.resists} 次）`;
     else if (g.t === "exposure") html = `💪 ${who} 硬着头皮做完【${g.behavior}】，恐惧淡了（-${g.faded.toFixed(2)}）`;
+    else if (g.t === "theft") html = g.caught
+      ? `🚨 ${who}（#${g.thief}）行窃被捕，${g.amount.toFixed(0)} 已归还 #${g.victim}（${g.area}）`
+      : `🚨 #${g.victim} 在${g.area}被盗 ${g.amount.toFixed(0)}（作案者隐匿）`;
+    else if (g.t === "job_change") html = `📰 ${who}：${g.from || "无业"} → ${g.to || "无业"}（${g.reason}）`;
     if (html) items.push({tick:g.tick, html});
   }
   items.sort((x,y)=>y.tick-x.tick);

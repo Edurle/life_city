@@ -13,6 +13,9 @@ use std::collections::BTreeMap;
 /// 随机子流用途编号：决策流与个体属性流分离，改一个不影响另一个的序列。
 pub const STREAM_DECISION: u8 = 0;
 pub const STREAM_INDIVIDUAL: u8 = 1;
+/// M5 人格轴（诚实度）专用流：新增抽样不扰动既有序列（旧存档/旧日志的
+/// 决策轨迹不受影响）。
+pub const STREAM_PERSONALITY: u8 = 3;
 
 fn d_species_cat() -> String {
     "cat".to_string()
@@ -20,6 +23,12 @@ fn d_species_cat() -> String {
 
 fn d_lod() -> u8 {
     0
+}
+fn d_half() -> f64 {
+    0.5
+}
+fn d_wallet() -> f64 {
+    300.0
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -33,6 +42,19 @@ pub struct Agent {
     pub is_player: bool,
     /// softmax 温度（探索性人格）：高温度更爱尝试低权重行为。
     pub temperature: f64,
+    /// 诚实度（0..1，M5 人格轴）：出生随机。斜率进犯罪与职业权重——
+    /// 越不诚实越倾向非法行当，但只是概率差异，无人被指定为小偷。
+    #[serde(default = "d_half")]
+    pub honesty: f64,
+    /// 钱包（M5 经济）：工资入账、消费扣款；见底产生经济压力。
+    #[serde(default = "d_wallet")]
+    pub wallet: f64,
+    /// 今日已领薪的天数标记（日薪制：加班到第二个班次不重复发钱）。
+    #[serde(default)]
+    pub salary_day: u64,
+    /// 当前职业（M5）：None = 无业。职业门按此放行工作分支。
+    #[serde(default)]
+    pub job: Option<String>,
     pub needs: Needs,
     /// 意志力（0–100）：违背习惯的指令消耗，睡眠恢复，平时缓慢回一点。
     pub willpower: f64,
@@ -72,6 +94,9 @@ impl Agent {
     ) -> Self {
         let mut rng_ind = Rng::seeded(derive_seed(world_seed, id, STREAM_INDIVIDUAL));
         let temperature = rng_ind.uniform(params.temperature_min, params.temperature_max);
+        // 诚实度从独立子流抽取（不打扰既有属性序列）。
+        let honesty =
+            Rng::seeded(derive_seed(world_seed, id, STREAM_PERSONALITY)).next_f64();
         let mut weights = BTreeMap::new();
         let mut base_weights = BTreeMap::new();
         for (bid, base) in behaviors {
@@ -85,6 +110,10 @@ impl Agent {
             species,
             is_player: false,
             temperature,
+            honesty,
+            wallet: d_wallet(),
+            salary_day: 0,
+            job: None,
             needs: Needs::full(),
             willpower: 100.0,
             pending_command: None,

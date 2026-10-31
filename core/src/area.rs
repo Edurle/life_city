@@ -11,6 +11,10 @@ pub struct AreaState {
     pub reputation: f64,
     pub cleanliness: f64,
     pub visits: u64,
+    /// 巡逻覆盖（0..1，M5 治安）：警察巡逻行为累积，缓慢消退。
+    /// 直接进入犯罪行为的被抓概率——"环境永久影响概率"的展示项。
+    #[serde(default)]
+    pub patrol: f64,
 }
 
 impl AreaState {
@@ -19,6 +23,7 @@ impl AreaState {
             reputation: def.reputation.clamp(0.0, 1.0),
             cleanliness: def.cleanliness.clamp(0.0, 1.0),
             visits: 0,
+            patrol: 0.0,
         }
     }
 
@@ -41,6 +46,11 @@ impl AreaState {
         self.cleanliness = (self.cleanliness + amount).min(1.0);
     }
 
+    /// 巡逻覆盖累积（警察巡逻行为完成时调用）。
+    pub fn patrol_raise(&mut self, amount: f64) {
+        self.patrol = (self.patrol + amount).min(1.0);
+    }
+
     /// 声誉与整洁度对行为权重的乘数：声誉 0 → area_mult_min，声誉 1 → min+span；
     /// 整洁度轻微修正（脏乱的公园即使口碑好也略减分）。
     pub fn behavior_mult(&self, area_mult_min: f64, area_mult_span: f64) -> f64 {
@@ -57,6 +67,7 @@ mod tests {
             reputation: 1.0,
             cleanliness: 1.0,
             visits: 0,
+            patrol: 0.0,
         }
     }
 

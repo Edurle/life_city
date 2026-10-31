@@ -57,6 +57,15 @@ pub struct ChoiceInfo {
     pub eff: f64,
 }
 
+/// 小镇年度统计（M5）：模拟器内累计的轻量计数，统计回归测试与
+/// CLI 年度摘要用——不必为了几个数字解析几十万行日志。
+#[derive(Debug, Default, Clone)]
+pub struct TownStats {
+    pub thefts: u64,
+    pub thefts_caught: u64,
+    pub job_changes: u64,
+}
+
 /// 玩家指令的结算结果。
 #[derive(Debug, Clone)]
 pub struct CommandOutcome {
@@ -141,6 +150,8 @@ pub struct World {
     /// 最近事件的环形缓冲（交互工具实时反馈用；基准/常规跑批关闭）。
     pub collect_recent: bool,
     pub recent_events: Vec<LogEvent>,
+    /// 年度统计（M5）。
+    pub stats: TownStats,
 }
 
 impl World {
@@ -161,7 +172,7 @@ impl World {
             .iter()
             .map(|s| (s.id.clone(), s.clone()))
             .collect();
-        let agents = roster
+        let mut agents = roster
             .into_iter()
             .enumerate()
             .map(|(i, (name, species))| {
@@ -186,6 +197,26 @@ impl World {
                         j as u32,
                         rel_rng.uniform(0.0, cfg.params.initial_bond_max),
                     );
+                }
+            }
+        }
+        // M5 世界生成：按岗位序分配职业（确定性，不掷随机数）。
+        // slots = 0 的非法行当不分配——小偷不是被指定的，是概率选出来的。
+        // 只给树里用了职业门的物种分配（人类有工作，猫没有）。
+        if !cfg.jobs.is_empty() {
+            let mut next = 0usize;
+            for job in cfg.jobs.iter().filter(|j| j.slots > 0) {
+                for _ in 0..job.slots {
+                    while next < agents.len()
+                        && !tree_uses_jobs(cfg.tree_for(&agents[next].species), &cfg.subtrees)
+                    {
+                        next += 1;
+                    }
+                    if next >= agents.len() {
+                        break;
+                    }
+                    agents[next].job = Some(job.id.clone());
+                    next += 1;
                 }
             }
         }
@@ -214,6 +245,7 @@ impl World {
             decisions_done: 0,
             collect_recent: false,
             recent_events: Vec::new(),
+            stats: TownStats::default(),
         }
     }
 
@@ -300,6 +332,39 @@ impl World {
                 a.next_heartbeat = a.next_heartbeat.min(self.tick + 5);
             }
         }
+    }
+
+    /// 小镇新闻摘要（M5，设计稿 6.3）：从日志里挑出值得播报的事件
+    /// 转成文本，取最近 max 条（时间正序）。CLI、play 与验收共用。
+    pub fn news_digest(&self, max: usize) -> Vec<String> {
+        let name_of = |id: u32| -> String {
+            self.agents
+                .iter()
+                .find(|a| a.id == id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| format!("#{id}"))
+        };
+        let job_name_of = |j: &str| -> String {
+            self.cfg
+                .jobs
+                .iter()
+                .find(|x| x.id == j)
+                .map(|x| x.display_name().to_string())
+                .unwrap_or_else(|| j.to_string())
+        };
+        let mut out: Vec<String> = Vec::new();
+        for line in self.logger.buf.lines().rev() {
+            if out.len() >= max {
+                break;
+            }
+            if let Ok(ev) = serde_json::from_str::<LogEvent>(line) {
+                if let Some(t) = crate::news::news_text(&ev, name_of, job_name_of) {
+                    out.push(t);
+                }
+            }
+        }
+        out.reverse();
+        out
     }
 
     /// 代理当前 LOD 层级（工具与测试用）。
@@ -495,7 +560,16 @@ impl World {
             for state in self.area_states.values_mut() {
                 state.daily_clean(clean);
             }
+            // M5 经济：每日生活费（房租水电的抽象）——钱包不劳动就漏。
+            let upkeep = self.cfg.params.daily_upkeep;
+            if upkeep > 0.0 {
+                for a in &mut self.agents {
+                    a.wallet = (a.wallet - upkeep).max(0.0);
+                }
+            }
             self.settle_background_day(&mut events);
+            // M5 职业流动：无业或经济压力大者每天评估一次（概率驱动，无剧本）。
+            self.job_market_daily(tick, &mut events);
         }
 
         // 需求衰减（每拍 = 每模拟分钟）。T2 背景代理跳过逐拍衰减，
@@ -566,6 +640,10 @@ impl World {
         // 小时边界：LOD 重分配（确定性函数）、习惯衰减（含目标压制）、
         // 限期目标到期结算、意志力缓慢回复、状态快照、地点状态快照。
         if is_hour_boundary(tick) {
+            // M5 治安：巡逻覆盖缓慢消退（没人巡逻的街区会慢慢"变黑"）。
+            for state in self.area_states.values_mut() {
+                state.patrol *= 0.995;
+            }
             self.refresh_lod();
             let rate = self.cfg.params.habit_decay_hourly;
             let gmult = self.cfg.params.goal_decay_mult;
@@ -582,6 +660,7 @@ impl World {
                         memories: a.memory.entries.len(),
                         willpower: a.willpower,
                         lod: a.lod,
+                        wallet: a.wallet,
                     });
                 }
             }
@@ -677,6 +756,7 @@ impl World {
                 }
             }
             let a = &mut self.agents[idx];
+            let mut wallet_delta = 0.0f64;
             if let Some(def) = &def {
                 for (need, delta) in &def.effects {
                     a.needs.add(need, *delta);
@@ -684,6 +764,27 @@ impl World {
                 // 睡眠类行为完成：恢复意志力。
                 if def.tags.iter().any(|t| t == "sleep") {
                     a.willpower = (a.willpower + 25.0).min(100.0);
+                }
+                // M5 经济：消费扣款 + 本班次工资入账。
+                if def.cost > 0.0 {
+                    a.wallet = (a.wallet - def.cost).max(0.0);
+                    wallet_delta -= def.cost;
+                }
+                // 日薪制：每天只发一次（第二个班次是热爱，不是加钱）。
+                if let Some(jid) = a.job.clone() {
+                    let today = crate::time::day_of(tick);
+                    if a.salary_day != today {
+                        if let Some(jd) = self
+                            .cfg
+                            .jobs
+                            .iter()
+                            .find(|j| j.id == jid && j.work_behavior == bid)
+                        {
+                            a.wallet += jd.salary;
+                            wallet_delta += jd.salary;
+                            a.salary_day = today;
+                        }
+                    }
                 }
             }
             a.habit_boost(&bid, alpha);
@@ -733,6 +834,15 @@ impl World {
                     }
                 }
             }
+            let me_id_now = a.id;
+            if wallet_delta.abs() > 1e-9 {
+                events.push(LogEvent::Wallet {
+                    tick,
+                    agent: me_id_now,
+                    delta: wallet_delta,
+                    value: a.wallet,
+                });
+            }
             events.push(LogEvent::ActionEnd {
                 tick,
                 agent: a.id,
@@ -742,7 +852,7 @@ impl World {
             if !companions.is_empty() {
                 let me_id = a.id;
                 let me_player = a.is_player;
-                for (oid, other_player, discount) in companions {
+                for &(oid, other_player, discount) in companions.iter() {
                     let gain = if me_player || other_player {
                         self.cfg.params.bond_player_gain
                     } else {
@@ -757,6 +867,44 @@ impl World {
                         value,
                     });
                 }
+                // M5 传闻（技术文档 4.5）：社交时光里把最显著的一段经历讲给同伴，
+                // 按亲密折扣写入"传闻:"记忆——与目睹同槽竞争，亲历更强时覆盖传闻。
+                let top: Option<crate::memory::MemoryEntry> = self.agents[me_id as usize]
+                    .memory
+                    .entries
+                    .iter()
+                    .filter(|m| m.strength >= 0.35)
+                    .max_by(|x, y| x.strength.total_cmp(&y.strength).then(x.event.cmp(&y.event)))
+                    .cloned();
+                if let Some(m) = top {
+                    for &(oid, _, _) in companions.iter() {
+                        let ev_name = crate::memory::hearsay_event(&m.event);
+                        let bond = self.relations.bond(me_id, oid);
+                        let intensity = m.strength * (0.4 + 0.6 * bond);
+                        let s = self.agents[oid as usize].memory.write(
+                            &ev_name,
+                            &m.tags,
+                            m.quarter,
+                            intensity,
+                            1.0,
+                            m.valence,
+                            true,
+                            m.mults.clone(),
+                            tick,
+                        );
+                        if s >= 0.05 {
+                            events.push(LogEvent::MemoryWrite {
+                                tick,
+                                agent: oid,
+                                event: ev_name,
+                                salience: s,
+                                mults: m.mults.clone(),
+                                source: Some(me_id),
+                                vicarious: true,
+                            });
+                        }
+                    }
+                }
             }
             // M3 地点声誉：行为完成 = 一次到访体验。体验 = 需求净值（饿了吃饭
             // 是好体验），到访同时留下脏乱。正体验拉高声誉、负体验压低——
@@ -769,6 +917,14 @@ impl World {
                     .and_then(|s| s.area.clone());
                 if let Some(aid) = area_id {
                     if let Some(state) = self.area_states.get_mut(&aid) {
+                        // M5 治安与整洁：巡逻行为累积区域巡逻覆盖；清洁/社区服务
+                        // 行为真实地让环境变好（打扫过的公园就是更干净）。
+                        if d.patrol_boost > 0.0 {
+                            state.patrol_raise(d.patrol_boost);
+                        }
+                        if d.clean_effect > 0.0 {
+                            state.daily_clean(d.clean_effect);
+                        }
                         let exp = behavior_experience(d);
                         let value = state.experience(exp, self.cfg.params.area_exp_alpha);
                         let litter_scale = self
@@ -788,6 +944,175 @@ impl World {
                             });
                         }
                     }
+                }
+            }
+            // M5 治安（设计稿 5.2）：犯罪行为完成时的通用结算——挑附近目标、
+            // 转移钱包、按环境（照明/巡逻/人流）掷被抓、写记忆与声誉冲击。
+            // 引擎不认识"小偷"，只认 crime 规格；干哪行是职业数据的事。
+            if let Some(spec) = def.as_ref().and_then(|d| d.crime.clone()) {
+                let thief_id = idx as u32;
+                let tpos = self.agents[idx].pos;
+                // 目标：8 米内钱包最鼓的那位（并列取编号小）——机会评估。
+                let victim = self
+                    .grid
+                    .query_radius(tpos, 8.0)
+                    .into_iter()
+                    .filter(|oid| {
+                        *oid != thief_id
+                            && self
+                                .agents
+                                .get(*oid as usize)
+                                .map(|v| v.wallet >= 20.0)
+                                .unwrap_or(false)
+                    })
+                    .min_by(|x, y| {
+                        let wx = self.agents[*x as usize].wallet;
+                        let wy = self.agents[*y as usize].wallet;
+                        wy.total_cmp(&wx).then(x.cmp(y))
+                    });
+                if let Some(vid) = victim {
+                    let frac = 0.3 + 0.5 * self.agents[idx].rng_decision.next_f64();
+                    let stolen = spec
+                        .max_take
+                        .min(self.agents[vid as usize].wallet * frac)
+                        .round();
+                    // 被抓概率 = 基础 × 照明 × 巡逻 × 人流（全是环境参数）。
+                    let area_id = self
+                        .cfg
+                        .areas
+                        .iter()
+                        .find(|a| a.contains(tpos))
+                        .map(|a| a.id.clone())
+                        .unwrap_or_default();
+                    let lighting = self
+                        .cfg
+                        .areas
+                        .iter()
+                        .find(|a| a.id == area_id)
+                        .map(|a| a.lighting)
+                        .unwrap_or(0.5);
+                    let patrol = self
+                        .area_states
+                        .get(&area_id)
+                        .map(|st| st.patrol)
+                        .unwrap_or(0.0);
+                    let crowd = ((self.grid.query_radius(tpos, 10.0).len().saturating_sub(1)).min(8)
+                        as f64)
+                        / 8.0;
+                    let p_caught = spec.caught_base
+                        * (1.0 - lighting * 0.5)
+                        * (1.0 - patrol * 0.6)
+                        * (1.0 - crowd * 0.4);
+                    let caught =
+                        self.agents[idx].rng_decision.next_f64() < p_caught;
+                    // 财物转移（被抓则当场归还）。
+                    self.agents[thief_id as usize].wallet += stolen;
+                    self.agents[vid as usize].wallet -= stolen;
+                    // 受害者记忆：关于小偷的负面记忆 + 案发情境标签（泛化回避）。
+                    let quarter = quarter_of_day(tick);
+                    let vpos = self.agents[vid as usize].pos;
+                    let mut ctx_tags = vec!["crime".to_string()];
+                    for sp in self.spots.values() {
+                        if dist((sp.x, sp.y), vpos) <= 8.0 {
+                            ctx_tags.extend(sp.tags.clone());
+                        }
+                    }
+                    ctx_tags.sort();
+                    ctx_tags.dedup();
+                    let salience = self.agents[vid as usize].memory.write(
+                        &spec.victim_event,
+                        &ctx_tags,
+                        quarter,
+                        spec.victim_intensity,
+                        1.0,
+                        spec.victim_valence,
+                        false,
+                        spec.victim_mults.clone(),
+                        tick,
+                    );
+                    self.agents[vid as usize]
+                        .memory
+                        .set_person(&spec.victim_event, quarter, thief_id);
+                    if salience >= 0.05 {
+                        events.push(LogEvent::MemoryWrite {
+                            tick,
+                            agent: vid,
+                            event: spec.victim_event.clone(),
+                            salience,
+                            mults: spec.victim_mults.clone(),
+                            source: None,
+                            vicarious: false,
+                        });
+                    }
+                    // 案发区域的声誉冲击（事件级放大：一次案子顶多次平淡到访）。
+                    if let Some(state) = self.area_states.get_mut(&area_id) {
+                        let exp = spec.victim_valence * spec.victim_intensity;
+                        let alpha = self.cfg.params.area_exp_alpha * 2.5;
+                        let value = state.experience(exp, alpha);
+                        events.push(LogEvent::ReputationChange {
+                            tick,
+                            area: area_id.clone(),
+                            experience: exp,
+                            value,
+                        });
+                    }
+                    let mut fired: Option<String> = None;
+                    if caught {
+                        self.agents[thief_id as usize].wallet -= stolen;
+                        self.agents[vid as usize].wallet += stolen;
+                        // 若这就是本职"工作行为"，开除（转正当的第一步往往是失业）。
+                        fired = self.agents[thief_id as usize].job.take();
+                        if let Some(from) = &fired {
+                            self.stats.job_changes += 1;
+                            events.push(LogEvent::JobChange {
+                                tick,
+                                agent: thief_id,
+                                from: Some(from.clone()),
+                                to: None,
+                                reason: "作案被捕".to_string(),
+                            });
+                        }
+                        // 社区服务排入下一拍 + 犯罪抑制记忆（犯罪史：被抓降低再犯）。
+                        let t = &mut self.agents[thief_id as usize];
+                        t.current = None;
+                        t.pending_command = Some(spec.service_behavior.clone());
+                        t.next_heartbeat = tick + 1;
+                        let sal = t.memory.write(
+                            "被捕",
+                            &["crime".to_string()],
+                            quarter,
+                            0.9,
+                            1.0,
+                            -0.7,
+                            false,
+                            BTreeMap::from([("crime".to_string(), 0.25)]),
+                            tick,
+                        );
+                        if sal >= 0.05 {
+                            events.push(LogEvent::MemoryWrite {
+                                tick,
+                                agent: thief_id,
+                                event: "被捕".to_string(),
+                                salience: sal,
+                                mults: BTreeMap::from([("crime".to_string(), 0.25)]),
+                                source: None,
+                                vicarious: false,
+                            });
+                        }
+                    }
+                    let _ = &fired;
+                    self.stats.thefts += 1;
+                    if caught {
+                        self.stats.thefts_caught += 1;
+                    }
+                    events.push(LogEvent::Theft {
+                        tick,
+                        thief: thief_id,
+                        victim: vid,
+                        amount: stolen,
+                        caught,
+                        area: area_id,
+                    });
                 }
             }
         }
@@ -820,6 +1145,112 @@ impl World {
         }
 
         self.emit(events);
+    }
+
+    /// M5 职业市场（设计稿 5.3 职业选择公式）：日界评估。
+    /// 候选 = 有空缺的岗位 + 无门槛的非法行当 + 无业；
+    /// 权重 = 职业基准 × 人格契合（诚实度斜率） × 经济压力。
+    /// 无剧本：失业者在压力下"小偷"分支的权重自然上升，
+    /// 治安好、就业足时多数人一生不会考虑非法职业。
+    fn job_market_daily(&mut self, tick: Tick, events: &mut Vec<LogEvent>) {
+        if self.cfg.jobs.is_empty() {
+            return; // 无职业系统的内容保持原样（不消耗随机数）
+        }
+        let poverty = self.cfg.params.poverty_line;
+        for idx in 0..self.agents.len() {
+            // 只有树里用职业门的物种参加（猫不找工作）。
+            if !tree_uses_jobs(
+                self.cfg.tree_for(&self.agents[idx].species),
+                &self.cfg.subtrees,
+            ) {
+                continue;
+            }
+            let (pressure, honesty, current) = {
+                let a = &self.agents[idx];
+                (
+                    economic_pressure(a.wallet, poverty),
+                    a.honesty,
+                    a.job.clone(),
+                )
+            };
+            let restless = current.is_none() || pressure > 0.5;
+            if !restless {
+                continue;
+            }
+            // 评估节奏：每天最多一次，且带点惰性（找工作和上班一样需要动力）。
+            if self.agents[idx].rng_decision.next_f64() > 0.35 {
+                continue;
+            }
+            let holders = |job: &str, agents: &Vec<Agent>| {
+                agents
+                    .iter()
+                    .filter(|a| a.job.as_deref() == Some(job))
+                    .count()
+            };
+            // 犯罪史记忆（设计稿 5.2）：被捕经历压制非法行当的吸引力——
+            // "被抓住后转正当职业"的机制载体，而非写死的剧情。
+            let crime_mult = {
+                let mem = self.agents[idx]
+                    .memory
+                    .query(quarter_of_day(tick), &["crime".to_string()], 0.0);
+                mem.get("crime").copied().unwrap_or(1.0)
+            };
+            let mut cands: Vec<(Option<String>, f64)> = self
+                .cfg
+                .jobs
+                .iter()
+                .filter(|j| j.slots == 0 || holders(&j.id, &self.agents) < j.slots)
+                .filter(|j| current.as_deref() != Some(j.id.as_str()))
+                // 入职条件（诚实度 / 经济压力门槛）。
+                .filter(|j| {
+                    j.require_honesty_below.is_none_or(|h| honesty < h)
+                        && j.require_pressure_above.is_none_or(|p_| pressure > p_)
+                })
+                .map(|j| {
+                    let fit = (1.0 + j.honesty_bias * (honesty - 0.5) * 2.0).max(0.05);
+                    let crime = if self.behaviors[&j.work_behavior].crime.is_some() {
+                        crime_mult
+                    } else {
+                        1.0
+                    };
+                    (
+                        Some(j.id.clone()),
+                        j.switch_weight * fit * (1.0 + pressure) * crime,
+                    )
+                })
+                .collect();
+            // 无业也是选项（低权重）——不是人人都会立刻上岗。
+            cands.push((None, 0.3));
+            let weights: Vec<f64> = cands.iter().map(|(_, w)| *w).collect();
+            let pick = softmax_pick(&weights, 1.0, &mut self.agents[idx].rng_decision);
+            let chosen = cands[pick].0.clone();
+            if chosen != current {
+                // 抢岗位：选中时再核一次空缺（同日的后来者可能已把坑占满）。
+                if let Some(jid) = &chosen {
+                    if let Some(jd) = self.cfg.jobs.iter().find(|j| &j.id == jid) {
+                        if jd.slots > 0 && holders(jid, &self.agents) >= jd.slots {
+                            continue; // 岗位已被占，明天再说
+                        }
+                    }
+                }
+                let reason = if pressure > 0.5 {
+                    "迫于生计"
+                } else if chosen.is_some() {
+                    "找到工作"
+                } else {
+                    "歇一阵"
+                };
+                self.stats.job_changes += 1;
+                events.push(LogEvent::JobChange {
+                    tick,
+                    agent: idx as u32,
+                    from: current,
+                    to: chosen.clone(),
+                    reason: reason.to_string(),
+                });
+                self.agents[idx].job = chosen;
+            }
+        }
     }
 
     /// 应用一个环境事件于指定位置：直接经历写入、惊吓反应、目睹传播。
@@ -1001,10 +1432,15 @@ impl World {
                     &self.agents[idx].needs,
                     &self.behaviors,
                     &self.cfg.subtrees,
+                    self.agents[idx].job.as_deref(),
                     hour,
                     &mut ids,
                 );
-                let avail: Vec<String> = ids.into_iter().map(|s| s.to_string()).collect();
+                let avail: Vec<String> = ids
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .filter(|b| self.behaviors[b].cost <= self.agents[idx].wallet + 1e-9)
+                    .collect();
                 if avail.is_empty() {
                     continue;
                 }
@@ -1029,13 +1465,26 @@ impl World {
                             .into_iter()
                             .map(|b| {
                                 let def = &self.behaviors[&b];
-                                let w = a.weights.get(&b).copied().unwrap_or(def.base_weight);
+                                let mut w = a.weights.get(&b).copied().unwrap_or(def.base_weight);
                                 let drive = def.drive_need().unwrap_or("fun");
                                 let nm = if def.effect_on(drive) > 0.0 {
                                     urgency(a.needs.get(drive).unwrap_or(100.0))
                                 } else {
                                     0.6
                                 };
+                                // 与完整模拟同规的人格/压力修正（简化选择不减规则）。
+                                if def.honesty_bias != 0.0 {
+                                    w *= 1.0
+                                        + def.honesty_bias * (a.honesty - 0.5) * 2.0;
+                                }
+                                if def.pressure_bias > 0.0 {
+                                    w *= 1.0
+                                        + def.pressure_bias
+                                            * economic_pressure(
+                                                a.wallet,
+                                                self.cfg.params.poverty_line,
+                                            );
+                                }
                                 (b, w * nm)
                             })
                             .collect();
@@ -1863,9 +2312,16 @@ fn compute_options(
         &a.needs,
         behaviors,
         &cfg.subtrees,
+        a.job.as_deref(),
         hour_of(tick) as u32,
         &mut avail,
     );
+    // M5 资源门槛：付不起的行为不进候选（钱包见底时只剩免费选项，
+    // 泡面与在家吃饭——贫困的形态由内容决定，机制只管门槛）。
+    avail.retain(|b| behaviors[*b].cost <= a.wallet + 1e-9);
+    // M5 人格与经济压力（设计稿 5.2 犯罪权重公式的通用旋钮）。
+    let honesty = a.honesty;
+    let pressure = economic_pressure(a.wallet, cfg.params.poverty_line);
     let quarter = quarter_of_day(tick);
     // 地点 → (记忆乘数表, 地点声誉乘数)（本决策内缓存；无地点行为共用空表）。
     let mut spot_mems: Vec<(Option<&str>, BTreeMap<String, f64>, f64)> = Vec::new();
@@ -1907,6 +2363,13 @@ fn compute_options(
                 .map(|t| mem_map.get(t).copied().unwrap_or(1.0))
                 .product::<f64>()
                 .clamp(0.05, 20.0);
+            let mut eff = w * nm * mm * area_mult;
+            if def.honesty_bias != 0.0 {
+                eff *= 1.0 + def.honesty_bias * (honesty - 0.5) * 2.0;
+            }
+            if def.pressure_bias > 0.0 {
+                eff *= 1.0 + def.pressure_bias * pressure;
+            }
             ChoiceInfo {
                 behavior: b.to_string(),
                 base: def.base_weight,
@@ -1914,7 +2377,7 @@ fn compute_options(
                 need_mult: nm,
                 mem_mult: mm,
                 area_mult,
-                eff: w * nm * mm * area_mult,
+                eff: eff.max(0.0),
             }
         })
         .collect()
@@ -1950,6 +2413,30 @@ fn forced_choice(
         }
     }
     None
+}
+
+/// 经济压力（M5）：钱包见底程度，0 = 富余，1 = 一贫如洗。
+/// 进入带 pressure_bias 的行为权重（穷则思变）与职业转行评估。
+pub fn economic_pressure(wallet: f64, poverty_line: f64) -> f64 {
+    1.0 - (wallet / poverty_line.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// 树里是否用到职业门（职业分配只面向有工作分支的物种）。
+fn tree_uses_jobs(node: &crate::config::TreeNode, subtrees: &BTreeMap<String, crate::config::TreeNode>) -> bool {
+    use crate::config::TreeNode;
+    match node {
+        TreeNode::Selector { children } => children.iter().any(|c| tree_uses_jobs(c, subtrees)),
+        // 职业门本身就是"这棵树用职业"的标志。
+        TreeNode::JobGate { .. } => true,
+        TreeNode::Gate { child, .. } | TreeNode::TimeGate { child, .. } => {
+            tree_uses_jobs(child, subtrees)
+        }
+        TreeNode::Subtree { tree_ref } => subtrees
+            .get(tree_ref)
+            .map(|t| tree_uses_jobs(t, subtrees))
+            .unwrap_or(false),
+        TreeNode::Action { .. } => false,
+    }
 }
 
 /// 需求门未开时给玩家看的提示文字。

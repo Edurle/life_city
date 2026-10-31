@@ -1,0 +1,1633 @@
+{
+  "needs": {
+    "hunger": 4.5,
+    "energy": 3.0,
+    "fun": 5.0,
+    "social": 3.0,
+    "hygiene": 2.0,
+    "bladder": 4.0
+  },
+  "critical_need": 15,
+  "params": {
+    "alpha": 0.06,
+    "habit_decay_hourly": 0.02,
+    "temperature_min": 0.7,
+    "temperature_max": 1.4,
+    "heartbeat_min": 5,
+    "heartbeat_max": 20,
+    "memory_cap": 500,
+    "memory_top_k": 8,
+    "weight_jitter": 0.1,
+    "map_width": 56.0,
+    "map_height": 36.0,
+    "witness_radius": 10.0,
+    "comfort_radius": 2.0,
+    "comfort_max": 0.8,
+    "imitation_factor": 0.7,
+    "imitation_min_bond": 0.25,
+    "startle_min_salience": 0.6,
+    "bond_social_gain": 0.08,
+    "bond_player_gain": 0.15,
+    "initial_bond_max": 0.3,
+    "area_exp_alpha": 0.15,
+    "area_mult_min": 0.35,
+    "area_mult_span": 1.1,
+    "visit_litter": 0.004,
+    "clean_daily": 0.35,
+    "lod_t0_radius": 12.0,
+    "lod_t1_radius": 22.0,
+    "lod_t0_cap": 64,
+    "lod_t1_cap": 256,
+    "lod_t1_heartbeat_min": 5,
+    "lod_t1_heartbeat_max": 30,
+    "lod_t1_witness_scale": 0.5,
+    "lod_t2_top_k": 3,
+    "lod_friend_bond": 0.5,
+    "habit_auto_ratio": 1.6,
+    "fear_mem_mult": 0.75,
+    "fear_command_cost": 10.0,
+    "exposure_decay": 0.88,
+    "close_friend_bond": 0.75,
+    "goal_resist_cost": 6.0,
+    "goal_break_cost": 15.0,
+    "goal_decay_mult": 4.0,
+    "daily_upkeep": 20.0
+  },
+  "areas": [
+    {
+      "id": "park",
+      "name": "公园",
+      "x": 1,
+      "y": 1,
+      "w": 16,
+      "h": 16,
+      "lighting": 0.3
+    },
+    {
+      "id": "street",
+      "name": "老街",
+      "x": 19,
+      "y": 1,
+      "w": 8,
+      "h": 34,
+      "lighting": 0.5
+    },
+    {
+      "id": "diner",
+      "name": "小饭馆",
+      "x": 29,
+      "y": 1,
+      "w": 6,
+      "h": 5,
+      "lighting": 0.7,
+      "litter_scale": 0.6
+    },
+    {
+      "id": "shop",
+      "name": "便利店",
+      "x": 29,
+      "y": 8,
+      "w": 6,
+      "h": 7,
+      "lighting": 0.8
+    },
+    {
+      "id": "bakery",
+      "name": "面包房",
+      "x": 29,
+      "y": 17,
+      "w": 6,
+      "h": 5,
+      "lighting": 0.8
+    },
+    {
+      "id": "office",
+      "name": "写字间",
+      "x": 29,
+      "y": 24,
+      "w": 6,
+      "h": 5,
+      "lighting": 0.8,
+      "litter_scale": 0.3
+    },
+    {
+      "id": "police",
+      "name": "派出所",
+      "x": 36,
+      "y": 28,
+      "w": 8,
+      "h": 7,
+      "lighting": 0.9,
+      "litter_scale": 0.3
+    },
+    {
+      "id": "home",
+      "name": "住宅区",
+      "x": 45,
+      "y": 1,
+      "w": 10,
+      "h": 34,
+      "lighting": 0.7,
+      "litter_scale": 0.1
+    }
+  ],
+  "spots": [
+    {
+      "id": "lawn",
+      "tags": [
+        "park",
+        "outdoor",
+        "grass"
+      ],
+      "x": 5,
+      "y": 8,
+      "area": "park"
+    },
+    {
+      "id": "bench",
+      "tags": [
+        "park",
+        "outdoor",
+        "sit"
+      ],
+      "x": 9,
+      "y": 4,
+      "area": "park"
+    },
+    {
+      "id": "fountain",
+      "tags": [
+        "park",
+        "outdoor",
+        "water"
+      ],
+      "x": 13,
+      "y": 10,
+      "area": "park"
+    },
+    {
+      "id": "garden_shed",
+      "tags": [
+        "park",
+        "tool"
+      ],
+      "x": 3,
+      "y": 13,
+      "area": "park"
+    },
+    {
+      "id": "sidewalk",
+      "tags": [
+        "street",
+        "outdoor"
+      ],
+      "x": 22,
+      "y": 30,
+      "area": "street"
+    },
+    {
+      "id": "crossing",
+      "tags": [
+        "street",
+        "outdoor"
+      ],
+      "x": 22,
+      "y": 10,
+      "area": "street"
+    },
+    {
+      "id": "alley",
+      "tags": [
+        "street",
+        "dark",
+        "alley"
+      ],
+      "x": 25,
+      "y": 4,
+      "area": "street"
+    },
+    {
+      "id": "shopfront",
+      "tags": [
+        "shop",
+        "food",
+        "outdoor"
+      ],
+      "x": 31,
+      "y": 11,
+      "area": "shop"
+    },
+    {
+      "id": "shelf",
+      "tags": [
+        "shop",
+        "food"
+      ],
+      "x": 31,
+      "y": 10,
+      "area": "shop"
+    },
+    {
+      "id": "diner_table",
+      "tags": [
+        "food",
+        "diner",
+        "indoor"
+      ],
+      "x": 32,
+      "y": 3.5,
+      "area": "diner"
+    },
+    {
+      "id": "stove_d",
+      "tags": [
+        "food",
+        "cook",
+        "indoor"
+      ],
+      "x": 30,
+      "y": 4.5,
+      "area": "diner"
+    },
+    {
+      "id": "oven",
+      "tags": [
+        "bakery",
+        "food",
+        "warm"
+      ],
+      "x": 30.5,
+      "y": 20,
+      "area": "bakery"
+    },
+    {
+      "id": "bakery_counter",
+      "tags": [
+        "bakery",
+        "food"
+      ],
+      "x": 32.5,
+      "y": 19,
+      "area": "bakery"
+    },
+    {
+      "id": "office_desk",
+      "tags": [
+        "work",
+        "indoor"
+      ],
+      "x": 32,
+      "y": 26.5,
+      "area": "office"
+    },
+    {
+      "id": "police_desk",
+      "tags": [
+        "work",
+        "indoor",
+        "police"
+      ],
+      "x": 40,
+      "y": 31.5,
+      "area": "police"
+    },
+    {
+      "id": "bed_h",
+      "tags": [
+        "home",
+        "sleep",
+        "soft"
+      ],
+      "x": 50,
+      "y": 30,
+      "area": "home"
+    },
+    {
+      "id": "table",
+      "tags": [
+        "home",
+        "food"
+      ],
+      "x": 48,
+      "y": 20,
+      "area": "home"
+    },
+    {
+      "id": "sofa_h",
+      "tags": [
+        "home",
+        "social",
+        "soft"
+      ],
+      "x": 49,
+      "y": 10,
+      "area": "home"
+    },
+    {
+      "id": "bath",
+      "tags": [
+        "home",
+        "clean"
+      ],
+      "x": 52,
+      "y": 25,
+      "area": "home"
+    },
+    {
+      "id": "stove",
+      "tags": [
+        "home",
+        "cook"
+      ],
+      "x": 53,
+      "y": 18,
+      "area": "home"
+    },
+    {
+      "id": "cat_bed",
+      "tags": [
+        "home",
+        "sleep",
+        "soft",
+        "quiet"
+      ],
+      "x": 50,
+      "y": 15,
+      "area": "home"
+    },
+    {
+      "id": "bowl",
+      "tags": [
+        "home",
+        "food"
+      ],
+      "x": 47,
+      "y": 14,
+      "area": "home"
+    },
+    {
+      "id": "windowsill",
+      "tags": [
+        "home",
+        "sun",
+        "view"
+      ],
+      "x": 54,
+      "y": 12,
+      "area": "home"
+    },
+    {
+      "id": "cat_tree",
+      "tags": [
+        "home",
+        "play",
+        "high"
+      ],
+      "x": 48,
+      "y": 28,
+      "area": "home"
+    },
+    {
+      "id": "box",
+      "tags": [
+        "home",
+        "hide",
+        "quiet"
+      ],
+      "x": 46.5,
+      "y": 5,
+      "area": "home"
+    },
+    {
+      "id": "litter",
+      "tags": [
+        "home",
+        "toilet"
+      ],
+      "x": 46,
+      "y": 33,
+      "area": "home"
+    },
+    {
+      "id": "scratching_post",
+      "tags": [
+        "home",
+        "scratch"
+      ],
+      "x": 49,
+      "y": 33,
+      "area": "home"
+    }
+  ],
+  "behaviors": [
+    {
+      "id": "eat_home",
+      "name": "在家吃饭",
+      "base_weight": 3.0,
+      "duration_min": 20,
+      "duration_max": 40,
+      "effects": {
+        "hunger": 50,
+        "fun": 5
+      },
+      "tags": [
+        "food",
+        "home"
+      ],
+      "spot": "table",
+      "gate_need": "hunger",
+      "gate_below": 70,
+      "cost": 18
+    },
+    {
+      "id": "cook_fancy",
+      "name": "下厨做顿好的",
+      "base_weight": 1.8,
+      "duration_min": 40,
+      "duration_max": 80,
+      "effects": {
+        "hunger": 60,
+        "fun": 14,
+        "energy": -5
+      },
+      "tags": [
+        "food",
+        "cook",
+        "home"
+      ],
+      "spot": "stove",
+      "gate_need": "hunger",
+      "gate_below": 60,
+      "cost": 40
+    },
+    {
+      "id": "instant_noodles",
+      "name": "泡个面",
+      "base_weight": 1.6,
+      "duration_min": 8,
+      "duration_max": 15,
+      "effects": {
+        "hunger": 25,
+        "fun": 3
+      },
+      "tags": [
+        "food",
+        "quick",
+        "home"
+      ],
+      "spot": "table",
+      "gate_need": "hunger",
+      "gate_below": 70,
+      "cost": 10
+    },
+    {
+      "id": "order_takeout",
+      "name": "点外卖",
+      "base_weight": 1.7,
+      "duration_min": 45,
+      "duration_max": 90,
+      "effects": {
+        "hunger": 45,
+        "fun": 8,
+        "energy": 3
+      },
+      "tags": [
+        "food",
+        "takeout",
+        "home",
+        "relax"
+      ],
+      "spot": "sofa_h",
+      "gate_need": "hunger",
+      "gate_below": 65,
+      "cost": 65
+    },
+    {
+      "id": "diner_meal",
+      "name": "下馆子",
+      "base_weight": 1.6,
+      "duration_min": 25,
+      "duration_max": 50,
+      "effects": {
+        "hunger": 50,
+        "fun": 15,
+        "social": 12
+      },
+      "tags": [
+        "food",
+        "diner",
+        "social"
+      ],
+      "spot": "diner_table",
+      "gate_need": "hunger",
+      "gate_below": 70,
+      "cost": 100
+    },
+    {
+      "id": "late_snack",
+      "name": "吃夜宵",
+      "base_weight": 2.2,
+      "duration_min": 15,
+      "duration_max": 30,
+      "effects": {
+        "hunger": 25,
+        "fun": 12
+      },
+      "tags": [
+        "food",
+        "night",
+        "home"
+      ],
+      "spot": "table",
+      "cost": 30
+    },
+    {
+      "id": "buy_snack",
+      "name": "买零食",
+      "base_weight": 1.4,
+      "duration_min": 10,
+      "duration_max": 20,
+      "effects": {
+        "hunger": 30,
+        "fun": 8
+      },
+      "tags": [
+        "food",
+        "outdoor"
+      ],
+      "spot": "shopfront",
+      "cost": 25
+    },
+    {
+      "id": "sleep_home",
+      "name": "在家睡觉",
+      "base_weight": 3.0,
+      "duration_min": 300,
+      "duration_max": 540,
+      "effects": {
+        "energy": 55
+      },
+      "tags": [
+        "sleep",
+        "home"
+      ],
+      "spot": "bed_h"
+    },
+    {
+      "id": "shower",
+      "name": "洗澡",
+      "base_weight": 1.5,
+      "duration_min": 15,
+      "duration_max": 25,
+      "effects": {
+        "hygiene": 50
+      },
+      "tags": [
+        "hygiene",
+        "home"
+      ],
+      "spot": "bath",
+      "gate_need": "hygiene",
+      "gate_below": 55
+    },
+    {
+      "id": "toilet_h",
+      "name": "上厕所",
+      "base_weight": 1.0,
+      "duration_min": 5,
+      "duration_max": 10,
+      "effects": {
+        "bladder": 65
+      },
+      "tags": [
+        "home"
+      ],
+      "spot": "bath",
+      "gate_need": "bladder",
+      "gate_below": 50
+    },
+    {
+      "id": "chat_street",
+      "name": "街头聊天",
+      "base_weight": 1.6,
+      "duration_min": 15,
+      "duration_max": 45,
+      "effects": {
+        "social": 30,
+        "fun": 5
+      },
+      "tags": [
+        "social",
+        "outdoor",
+        "street"
+      ],
+      "spot": "sidewalk",
+      "gate_need": "social",
+      "gate_below": 60
+    },
+    {
+      "id": "phone_call",
+      "name": "打电话唠嗑",
+      "base_weight": 1.4,
+      "duration_min": 10,
+      "duration_max": 25,
+      "effects": {
+        "social": 18,
+        "fun": 5
+      },
+      "tags": [
+        "social",
+        "remote_social"
+      ],
+      "gate_need": "social",
+      "gate_below": 60
+    },
+    {
+      "id": "walk_park",
+      "name": "逛公园",
+      "base_weight": 2.0,
+      "duration_min": 30,
+      "duration_max": 90,
+      "effects": {
+        "fun": 20,
+        "energy": -5
+      },
+      "tags": [
+        "park",
+        "outdoor"
+      ],
+      "spot": "lawn"
+    },
+    {
+      "id": "bench_sit",
+      "name": "长椅小坐",
+      "base_weight": 1.5,
+      "duration_min": 20,
+      "duration_max": 60,
+      "effects": {
+        "fun": 8,
+        "energy": 8
+      },
+      "tags": [
+        "park",
+        "outdoor"
+      ],
+      "spot": "bench"
+    },
+    {
+      "id": "watch_fountain",
+      "name": "看喷泉",
+      "base_weight": 1.0,
+      "duration_min": 15,
+      "duration_max": 40,
+      "effects": {
+        "fun": 12
+      },
+      "tags": [
+        "park",
+        "outdoor"
+      ],
+      "spot": "fountain"
+    },
+    {
+      "id": "stroll",
+      "name": "散步",
+      "base_weight": 1.2,
+      "duration_min": 20,
+      "duration_max": 50,
+      "effects": {
+        "fun": 10,
+        "energy": -4
+      },
+      "tags": [
+        "outdoor",
+        "street"
+      ],
+      "spot": "crossing"
+    },
+    {
+      "id": "watch_tv",
+      "name": "看电视",
+      "base_weight": 1.2,
+      "duration_min": 30,
+      "duration_max": 90,
+      "effects": {
+        "fun": 15,
+        "social": 5
+      },
+      "tags": [
+        "relax",
+        "home"
+      ],
+      "spot": "sofa_h"
+    },
+    {
+      "id": "bake_work",
+      "name": "面包房上工",
+      "base_weight": 5.0,
+      "duration_min": 240,
+      "duration_max": 420,
+      "effects": {
+        "energy": -8,
+        "fun": 4,
+        "social": 6
+      },
+      "tags": [
+        "work",
+        "bakery",
+        "food"
+      ],
+      "spot": "oven"
+    },
+    {
+      "id": "clerk_work",
+      "name": "便利店收银",
+      "base_weight": 5.0,
+      "duration_min": 240,
+      "duration_max": 420,
+      "effects": {
+        "energy": -8,
+        "social": 6
+      },
+      "tags": [
+        "work",
+        "shop"
+      ],
+      "spot": "shopfront"
+    },
+    {
+      "id": "office_work",
+      "name": "写字间上班",
+      "base_weight": 5.0,
+      "duration_min": 240,
+      "duration_max": 420,
+      "effects": {
+        "energy": -10,
+        "fun": -3,
+        "social": 8
+      },
+      "tags": [
+        "work",
+        "indoor"
+      ],
+      "spot": "office_desk"
+    },
+    {
+      "id": "patrol_work",
+      "name": "街面巡逻",
+      "base_weight": 5.0,
+      "duration_min": 200,
+      "duration_max": 360,
+      "effects": {
+        "energy": -10,
+        "social": 6,
+        "fun": 2
+      },
+      "tags": [
+        "work",
+        "patrol",
+        "outdoor"
+      ],
+      "spot": "crossing",
+      "patrol_boost": 0.35
+    },
+    {
+      "id": "garden_work",
+      "name": "公园养护",
+      "base_weight": 5.0,
+      "duration_min": 200,
+      "duration_max": 360,
+      "effects": {
+        "energy": -12,
+        "fun": 4
+      },
+      "tags": [
+        "work",
+        "park",
+        "outdoor"
+      ],
+      "spot": "garden_shed",
+      "clean_effect": 0.15
+    },
+    {
+      "id": "cook_work",
+      "name": "饭馆掌勺",
+      "base_weight": 5.0,
+      "duration_min": 240,
+      "duration_max": 420,
+      "effects": {
+        "energy": -10,
+        "fun": 4
+      },
+      "tags": [
+        "work",
+        "food",
+        "cook"
+      ],
+      "spot": "stove_d"
+    },
+    {
+      "id": "deliver_work",
+      "name": "外卖配送",
+      "base_weight": 5.0,
+      "duration_min": 220,
+      "duration_max": 400,
+      "effects": {
+        "energy": -14,
+        "fun": 1
+      },
+      "tags": [
+        "work",
+        "outdoor",
+        "street"
+      ]
+    },
+    {
+      "id": "steal",
+      "name": "摸黑作案",
+      "base_weight": 0.45,
+      "duration_min": 40,
+      "duration_max": 80,
+      "effects": {
+        "energy": -6
+      },
+      "tags": [
+        "crime",
+        "night"
+      ],
+      "honesty_bias": -1.2,
+      "pressure_bias": 2.0,
+      "crime": {
+        "max_take": 120.0,
+        "caught_base": 0.5,
+        "service_behavior": "community_service",
+        "victim_event": "被偷",
+        "victim_intensity": 0.8,
+        "victim_valence": -0.8,
+        "victim_mults": {
+          "night": 0.45,
+          "outdoor": 0.65
+        }
+      }
+    },
+    {
+      "id": "community_service",
+      "name": "社区服务·打扫公园",
+      "base_weight": 0.3,
+      "duration_min": 60,
+      "duration_max": 120,
+      "effects": {
+        "energy": -8,
+        "fun": -2
+      },
+      "tags": [
+        "service",
+        "park",
+        "outdoor"
+      ],
+      "spot": "lawn",
+      "clean_effect": 0.3
+    },
+    {
+      "id": "eat_cat",
+      "name": "吃猫粮",
+      "base_weight": 3.0,
+      "duration_min": 10,
+      "duration_max": 30,
+      "effects": {
+        "hunger": 50,
+        "energy": 5
+      },
+      "tags": [
+        "food",
+        "home"
+      ],
+      "spot": "bowl",
+      "gate_need": "hunger",
+      "gate_below": 70
+    },
+    {
+      "id": "sleep_cat",
+      "name": "睡猫窝",
+      "base_weight": 3.0,
+      "duration_min": 90,
+      "duration_max": 300,
+      "effects": {
+        "energy": 55
+      },
+      "tags": [
+        "sleep",
+        "home",
+        "quiet"
+      ],
+      "spot": "cat_bed"
+    },
+    {
+      "id": "nap_window",
+      "name": "窗台打盹",
+      "base_weight": 2.2,
+      "duration_min": 30,
+      "duration_max": 90,
+      "effects": {
+        "energy": 28,
+        "fun": 8
+      },
+      "tags": [
+        "sleep",
+        "home",
+        "sun"
+      ],
+      "spot": "windowsill"
+    },
+    {
+      "id": "nap_lawn",
+      "name": "草坪晒太阳",
+      "base_weight": 1.6,
+      "duration_min": 30,
+      "duration_max": 90,
+      "effects": {
+        "energy": 20,
+        "fun": 10
+      },
+      "tags": [
+        "sleep",
+        "park",
+        "outdoor",
+        "sun"
+      ],
+      "spot": "lawn"
+    },
+    {
+      "id": "play_tree",
+      "name": "爬猫爬架",
+      "base_weight": 1.6,
+      "duration_min": 15,
+      "duration_max": 45,
+      "effects": {
+        "fun": 32,
+        "energy": -8
+      },
+      "tags": [
+        "play",
+        "home"
+      ],
+      "spot": "cat_tree"
+    },
+    {
+      "id": "cuddle_sofa",
+      "name": "沙发蹭蹭",
+      "base_weight": 1.5,
+      "duration_min": 10,
+      "duration_max": 30,
+      "effects": {
+        "social": 32,
+        "fun": 5
+      },
+      "tags": [
+        "social",
+        "home"
+      ],
+      "spot": "sofa_h"
+    },
+    {
+      "id": "hide_box",
+      "name": "躲纸箱",
+      "base_weight": 1.0,
+      "duration_min": 15,
+      "duration_max": 45,
+      "effects": {
+        "fun": 2
+      },
+      "tags": [
+        "hide",
+        "home",
+        "quiet"
+      ],
+      "spot": "box"
+    },
+    {
+      "id": "scratch",
+      "name": "磨爪子",
+      "base_weight": 0.8,
+      "duration_min": 5,
+      "duration_max": 15,
+      "effects": {
+        "fun": 12
+      },
+      "tags": [
+        "scratch",
+        "play",
+        "home"
+      ],
+      "spot": "scratching_post"
+    },
+    {
+      "id": "patrol_street",
+      "name": "上街巡逻",
+      "base_weight": 1.2,
+      "duration_min": 15,
+      "duration_max": 45,
+      "effects": {
+        "fun": 12,
+        "energy": -4
+      },
+      "tags": [
+        "explore",
+        "outdoor",
+        "street"
+      ],
+      "spot": "crossing"
+    },
+    {
+      "id": "groom",
+      "name": "舔毛",
+      "base_weight": 1.2,
+      "duration_min": 20,
+      "duration_max": 40,
+      "effects": {
+        "hygiene": 35
+      },
+      "tags": [
+        "groom",
+        "home"
+      ],
+      "gate_need": "hygiene",
+      "gate_below": 55
+    },
+    {
+      "id": "litter_cat",
+      "name": "上猫砂盆",
+      "base_weight": 1.0,
+      "duration_min": 5,
+      "duration_max": 10,
+      "effects": {
+        "bladder": 65
+      },
+      "tags": [
+        "toilet",
+        "home"
+      ],
+      "spot": "litter",
+      "gate_need": "bladder",
+      "gate_below": 50
+    }
+  ],
+  "jobs": [
+    {
+      "id": "baker",
+      "name": "面包师",
+      "work_behavior": "bake_work",
+      "salary": 120,
+      "slots": 3,
+      "switch_weight": 1.0,
+      "honesty_bias": 0.2
+    },
+    {
+      "id": "clerk",
+      "name": "便利店店员",
+      "work_behavior": "clerk_work",
+      "salary": 100,
+      "slots": 4,
+      "switch_weight": 1.0,
+      "honesty_bias": 0.1
+    },
+    {
+      "id": "office_worker",
+      "name": "写字间职员",
+      "work_behavior": "office_work",
+      "salary": 140,
+      "slots": 4,
+      "switch_weight": 1.0,
+      "honesty_bias": 0.2
+    },
+    {
+      "id": "police",
+      "name": "警察",
+      "work_behavior": "patrol_work",
+      "salary": 130,
+      "slots": 3,
+      "switch_weight": 0.8,
+      "honesty_bias": 0.6
+    },
+    {
+      "id": "gardener",
+      "name": "园丁",
+      "work_behavior": "garden_work",
+      "salary": 90,
+      "slots": 2,
+      "switch_weight": 0.9,
+      "honesty_bias": 0.3
+    },
+    {
+      "id": "cook",
+      "name": "厨师",
+      "work_behavior": "cook_work",
+      "salary": 125,
+      "slots": 2,
+      "switch_weight": 1.0,
+      "honesty_bias": 0.2
+    },
+    {
+      "id": "courier",
+      "name": "外卖骑手",
+      "work_behavior": "deliver_work",
+      "salary": 110,
+      "slots": 3,
+      "switch_weight": 1.1,
+      "honesty_bias": 0.0
+    },
+    {
+      "id": "thief",
+      "name": "小偷",
+      "work_behavior": "steal",
+      "salary": 0,
+      "slots": 0,
+      "switch_weight": 0.25,
+      "honesty_bias": -1.5,
+      "require_honesty_below": 0.35,
+      "require_pressure_above": 0.6
+    }
+  ],
+  "subtrees": {
+    "meals": {
+      "type": "selector",
+      "children": [
+        {
+          "type": "gate",
+          "need": "hunger",
+          "below": 70,
+          "child": {
+            "type": "action",
+            "behavior": "eat_home"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "hunger",
+          "below": 60,
+          "child": {
+            "type": "action",
+            "behavior": "cook_fancy"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "hunger",
+          "below": 70,
+          "child": {
+            "type": "action",
+            "behavior": "instant_noodles"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "hunger",
+          "below": 65,
+          "child": {
+            "type": "action",
+            "behavior": "order_takeout"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "hunger",
+          "below": 70,
+          "child": {
+            "type": "action",
+            "behavior": "diner_meal"
+          }
+        },
+        {
+          "type": "time_gate",
+          "from": 21,
+          "to": 24,
+          "child": {
+            "type": "action",
+            "behavior": "late_snack"
+          }
+        }
+      ]
+    },
+    "rest": {
+      "type": "selector",
+      "children": [
+        {
+          "type": "time_gate",
+          "from": 22,
+          "to": 6,
+          "child": {
+            "type": "gate",
+            "need": "energy",
+            "below": 80,
+            "child": {
+              "type": "action",
+              "behavior": "sleep_home"
+            }
+          }
+        },
+        {
+          "type": "gate",
+          "need": "energy",
+          "below": 45,
+          "child": {
+            "type": "action",
+            "behavior": "sleep_home"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "hygiene",
+          "below": 55,
+          "child": {
+            "type": "action",
+            "behavior": "shower"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "bladder",
+          "below": 50,
+          "child": {
+            "type": "action",
+            "behavior": "toilet_h"
+          }
+        }
+      ]
+    },
+    "socializing": {
+      "type": "selector",
+      "children": [
+        {
+          "type": "gate",
+          "need": "social",
+          "below": 60,
+          "child": {
+            "type": "action",
+            "behavior": "chat_street"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "social",
+          "below": 60,
+          "child": {
+            "type": "action",
+            "behavior": "phone_call"
+          }
+        }
+      ]
+    },
+    "careers": {
+      "type": "selector",
+      "children": [
+        {
+          "type": "job_gate",
+          "job": "baker",
+          "child": {
+            "type": "time_gate",
+            "from": 5,
+            "to": 14,
+            "child": {
+              "type": "action",
+              "behavior": "bake_work"
+            }
+          }
+        },
+        {
+          "type": "job_gate",
+          "job": "clerk",
+          "child": {
+            "type": "time_gate",
+            "from": 8,
+            "to": 22,
+            "child": {
+              "type": "action",
+              "behavior": "clerk_work"
+            }
+          }
+        },
+        {
+          "type": "job_gate",
+          "job": "office_worker",
+          "child": {
+            "type": "time_gate",
+            "from": 9,
+            "to": 18,
+            "child": {
+              "type": "action",
+              "behavior": "office_work"
+            }
+          }
+        },
+        {
+          "type": "job_gate",
+          "job": "police",
+          "child": {
+            "type": "time_gate",
+            "from": 9,
+            "to": 21,
+            "child": {
+              "type": "action",
+              "behavior": "patrol_work"
+            }
+          }
+        },
+        {
+          "type": "job_gate",
+          "job": "gardener",
+          "child": {
+            "type": "time_gate",
+            "from": 7,
+            "to": 17,
+            "child": {
+              "type": "action",
+              "behavior": "garden_work"
+            }
+          }
+        },
+        {
+          "type": "job_gate",
+          "job": "cook",
+          "child": {
+            "type": "time_gate",
+            "from": 10,
+            "to": 21,
+            "child": {
+              "type": "action",
+              "behavior": "cook_work"
+            }
+          }
+        },
+        {
+          "type": "job_gate",
+          "job": "courier",
+          "child": {
+            "type": "time_gate",
+            "from": 10,
+            "to": 22,
+            "child": {
+              "type": "action",
+              "behavior": "deliver_work"
+            }
+          }
+        },
+        {
+          "type": "job_gate",
+          "job": "thief",
+          "child": {
+            "type": "time_gate",
+            "from": 21,
+            "to": 6,
+            "child": {
+              "type": "action",
+              "behavior": "steal"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "tree": {
+    "type": "selector",
+    "children": [
+      {
+        "type": "gate",
+        "need": "hunger",
+        "below": 70,
+        "child": {
+          "type": "action",
+          "behavior": "eat_cat"
+        }
+      },
+      {
+        "type": "gate",
+        "need": "energy",
+        "below": 45,
+        "child": {
+          "type": "action",
+          "behavior": "sleep_cat"
+        }
+      },
+      {
+        "type": "gate",
+        "need": "energy",
+        "below": 70,
+        "child": {
+          "type": "action",
+          "behavior": "nap_window"
+        }
+      },
+      {
+        "type": "time_gate",
+        "from": 6,
+        "to": 19,
+        "child": {
+          "type": "action",
+          "behavior": "nap_lawn"
+        }
+      },
+      {
+        "type": "gate",
+        "need": "hygiene",
+        "below": 55,
+        "child": {
+          "type": "action",
+          "behavior": "groom"
+        }
+      },
+      {
+        "type": "gate",
+        "need": "bladder",
+        "below": 50,
+        "child": {
+          "type": "action",
+          "behavior": "litter_cat"
+        }
+      },
+      {
+        "type": "gate",
+        "need": "social",
+        "below": 60,
+        "child": {
+          "type": "action",
+          "behavior": "cuddle_sofa"
+        }
+      },
+      {
+        "type": "action",
+        "behavior": "play_tree"
+      },
+      {
+        "type": "action",
+        "behavior": "patrol_street"
+      },
+      {
+        "type": "action",
+        "behavior": "hide_box"
+      },
+      {
+        "type": "action",
+        "behavior": "scratch"
+      }
+    ]
+  },
+  "trees": {
+    "human": {
+      "type": "selector",
+      "children": [
+        {
+          "type": "subtree",
+          "ref": "meals"
+        },
+        {
+          "type": "subtree",
+          "ref": "rest"
+        },
+        {
+          "type": "subtree",
+          "ref": "socializing"
+        },
+        {
+          "type": "subtree",
+          "ref": "careers"
+        },
+        {
+          "type": "time_gate",
+          "from": 6,
+          "to": 21,
+          "child": {
+            "type": "selector",
+            "children": [
+              {
+                "type": "action",
+                "behavior": "walk_park"
+              },
+              {
+                "type": "action",
+                "behavior": "bench_sit"
+              },
+              {
+                "type": "action",
+                "behavior": "watch_fountain"
+              },
+              {
+                "type": "action",
+                "behavior": "stroll"
+              }
+            ]
+          }
+        },
+        {
+          "type": "time_gate",
+          "from": 7,
+          "to": 22,
+          "child": {
+            "type": "action",
+            "behavior": "buy_snack"
+          }
+        },
+        {
+          "type": "action",
+          "behavior": "watch_tv"
+        }
+      ]
+    }
+  },
+  "env_events": [
+    {
+      "id": "park_rowdy",
+      "name": "公园醉汉滋事",
+      "tags": [
+        "scary",
+        "crowd"
+      ],
+      "area": "park",
+      "radius": 4.5,
+      "interval_min": 2200,
+      "interval_max": 4400,
+      "valence": -0.8,
+      "intensity": 0.75,
+      "behavior_mults": {
+        "park": 0.4,
+        "outdoor": 0.7
+      },
+      "immune_behavior_tags": []
+    },
+    {
+      "id": "park_concert",
+      "name": "公园音乐会",
+      "tags": [
+        "music",
+        "crowd"
+      ],
+      "area": "park",
+      "radius": 6.0,
+      "interval_min": 3000,
+      "interval_max": 6000,
+      "valence": 0.8,
+      "intensity": 0.6,
+      "behavior_mults": {
+        "park": 1.6
+      },
+      "immune_behavior_tags": []
+    },
+    {
+      "id": "night_noise",
+      "name": "夜间施工噪音",
+      "tags": [
+        "noise",
+        "night"
+      ],
+      "area": "home",
+      "radius": 3.5,
+      "interval_min": 1500,
+      "interval_max": 3000,
+      "from_hour": 22,
+      "to_hour": 6,
+      "valence": -0.6,
+      "intensity": 0.5,
+      "behavior_mults": {
+        "sleep": 0.5
+      },
+      "immune_behavior_tags": [
+        "sleep"
+      ]
+    },
+    {
+      "id": "shop_delivery",
+      "name": "便利店到新货",
+      "tags": [
+        "food",
+        "fresh"
+      ],
+      "area": "shop",
+      "radius": 3.0,
+      "interval_min": 800,
+      "interval_max": 1600,
+      "valence": 0.6,
+      "intensity": 0.5,
+      "behavior_mults": {
+        "food": 2.0
+      },
+      "immune_behavior_tags": []
+    },
+    {
+      "id": "street_cat_food",
+      "name": "街角出现猫粮",
+      "tags": [
+        "food",
+        "street"
+      ],
+      "area": "street",
+      "radius": 2.5,
+      "interval_min": 1000,
+      "interval_max": 2000,
+      "valence": 0.7,
+      "intensity": 0.5,
+      "behavior_mults": {
+        "food": 2.5
+      },
+      "immune_behavior_tags": []
+    }
+  ]
+}

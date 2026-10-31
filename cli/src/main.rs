@@ -104,6 +104,21 @@ fn main() {
         }
     }
 
+    // M5 小镇快报：从日志生成的新闻 + 年度统计。
+    let news = world.news_digest(8);
+    if !news.is_empty() {
+        println!("\n=== 小镇快报（最近） ===");
+        for n in &news {
+            println!("  {n}");
+        }
+    }
+    if world.stats.thefts > 0 || world.stats.job_changes > 0 {
+        println!(
+            "\n=== 统计 === 盗窃 {} 起（被抓 {}）· 职业变动 {} 次",
+            world.stats.thefts, world.stats.thefts_caught, world.stats.job_changes
+        );
+    }
+
     if !save_path.is_empty() {
         let path = PathBuf::from(&save_path);
         if let Some(dir) = path.parent() {

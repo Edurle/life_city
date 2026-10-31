@@ -1334,11 +1334,10 @@ fn goal_resist_suppress_and_rebound() {
     let w_start = w.agents[0].weights["walk_park"];
     // 跑两天：权重被目标压制加速回落（对比自然衰减）。
     let will_start = w.agents[0].willpower;
-    let mut resists = 0u32;
     w.collect_recent = true;
     let before = w.recent_events.len();
     w.run(2 * 1440);
-    resists = w.recent_events[before..]
+    let resists = w.recent_events[before..]
         .iter()
         .filter(|e| matches!(e, living_core::LogEvent::GoalResist { .. }))
         .count() as u32;
@@ -1665,4 +1664,353 @@ fn work_becomes_habit() {
         ratio > 1.05,
         "天天上班应自然累积职业习惯（当前 ×{ratio:.2}）"
     );
+}
+
+// ---------- M5 一座镇（一阶段）：职业与经济、犯罪与治安、传闻与新闻 ----------
+
+fn town_cfg() -> living_core::SimConfig {
+    let json = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../assets/town.json"
+    ))
+    .expect("需要 assets/town.json");
+    load_config(&json).unwrap()
+}
+
+fn town_world(seed: u64, humans: usize) -> World {
+    let roster: Vec<(String, String)> = living_core::human_names(humans)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    let mut w = World::new(town_cfg(), seed, roster, true);
+    w.set_player(0);
+    w.log_meta(seed, 0);
+    w
+}
+
+/// 世界生成器：岗位按序分配、非法行当不被指派、猫不参加工作。
+#[test]
+fn town_job_assignment_and_economy_flow() {
+    let mut w = town_world(3, 26);
+    let employed = w
+        .agents
+        .iter()
+        .filter(|a| a.species == "human" && a.job.is_some())
+        .count();
+    assert_eq!(employed, 21, "21 个岗位给 21 人（小偷不指派，5 人待业）");
+    // 跑五天：工作者挣到钱（钱包高于初始），且镇上有消费发生。
+    let start: Vec<f64> = w.agents.iter().map(|a| a.wallet).collect();
+    w.run(5 * 1440);
+    let workers_gained = w
+        .agents
+        .iter()
+        .zip(&start)
+        .filter(|(a, s)| a.job.is_some() && a.species == "human" && a.wallet > *s + 50.0)
+        .count();
+    assert!(workers_gained >= 10, "五天后多数工作者应攒下钱：{workers_gained}");
+    let spending = w
+        .logger
+        .buf
+        .lines()
+        .filter(|l| l.contains(r#""t":"wallet""#) && l.contains(r#""delta":-"#))
+        .count();
+    assert!(spending > 10, "应有消费流水：{spending}");
+}
+
+/// 资源门槛：付不起的行为不进候选（泡面自由是贫困线以下的尊严）。
+#[test]
+fn resource_gate_blocks_unaffordable_food() {
+    let mut w = town_world(5, 6);
+    while living_core::time::hour_of(w.tick) < 9 {
+        w.tick();
+    }
+    w.agents[0].wallet = 12.0;
+    w.agents[0].needs.hunger = 40.0; // 饿了，门开
+    let opts = w.debug_options(0);
+    let has = |b: &str| opts.iter().any(|o| o.behavior == b);
+    assert!(!has("diner_meal"), "下馆子（90）不该出现在候选里");
+    assert!(!has("order_takeout"), "外卖（65）不该出现");
+    assert!(has("instant_noodles"), "泡面（10）应可负担");
+    // 有钱之后选项回来。
+    w.agents[0].wallet = 500.0;
+    let opts = w.debug_options(0);
+    assert!(opts.iter().any(|o| o.behavior == "diner_meal"));
+}
+
+/// 犯罪得手路径：财物转移、受害者记忆（关于小偷本人）、区域声誉冲击。
+#[test]
+fn crime_success_transfers_and_memorializes() {
+    let mut w = town_world(7, 4);
+    while living_core::time::hour_of(w.tick) != 22 {
+        w.tick();
+    }
+    // 环境概率有稀释（照明/巡逻/人流），循环作案直到至少一起得手——
+    // 固定种子下确定性收敛，断言对"得手的那起"做。
+    let rep_before = w.area_states["street"].reputation;
+    let start_wallet = w.agents[0].wallet;
+    let mut got_away = false;
+    for _ in 0..10 {
+        w.agents[1].wallet = 300.0;
+        w.agents[0].job = Some("thief".into());
+        for i in [0usize, 1] {
+            w.agents[i].needs = living_core::needs::Needs::full();
+            w.agents[i].current = None;
+        }
+        w.agents[1].next_heartbeat = w.tick + 500; // 钉在案发现场
+        w.teleport(0, (25.0, 4.0));
+        w.teleport(1, (25.2, 4.0));
+        w.agents[0].pending_command = Some("steal".into());
+        w.agents[0].next_heartbeat = w.tick + 1;
+        w.run(90);
+        if w.stats.thefts > w.stats.thefts_caught {
+            got_away = true;
+            break;
+        }
+    }
+    assert!(got_away, "十次作案应至少一起得手");
+    assert!(w.agents[0].wallet > start_wallet, "得手的小偷应更有钱");
+    // 受害者写入了关于小偷本人的负面记忆。
+    let vm = w.agents[1]
+        .memory
+        .entries
+        .iter()
+        .find(|m| m.event == "被偷")
+        .expect("受害者应有被偷记忆");
+    assert_eq!(vm.person, Some(0), "记忆应指向小偷本人");
+    assert!(
+        w.area_states["street"].reputation < rep_before,
+        "案发街区声誉应受冲击"
+    );
+    let has_theft_log = w.logger.buf.contains("\"t\":\"theft\"");
+    assert!(has_theft_log, "应有案发日志");
+}
+
+/// 犯罪被抓路径：归还、开除、社区服务排程、被捕记忆压制再犯。
+#[test]
+fn crime_caught_full_consequences() {
+    // 被抓基础概率拉满（环境乘数仍会稀释，循环作案直到被抓——确定性收敛）。
+    let json = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../assets/town.json"
+    ))
+    .unwrap();
+    let cfg = load_config(&json.replace(r#""caught_base": 0.5"#, r#""caught_base": 1.0"#)).unwrap();
+    let roster: Vec<(String, String)> = living_core::human_names(4)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    let mut w = World::new(cfg, 11, roster, true);
+    w.set_player(0);
+    while living_core::time::hour_of(w.tick) != 22 {
+        w.tick();
+    }
+    let mut caught = false;
+    for _ in 0..10 {
+        w.agents[1].wallet = 300.0;
+        w.agents[0].job = Some("thief".into());
+        for i in [0usize, 1] {
+            w.agents[i].needs = living_core::needs::Needs::full();
+            w.agents[i].current = None;
+        }
+        w.agents[1].next_heartbeat = w.tick + 500;
+        w.teleport(0, (25.0, 4.0));
+        w.teleport(1, (25.2, 4.0));
+        w.agents[0].pending_command = Some("steal".into());
+        w.agents[0].next_heartbeat = w.tick + 1;
+        w.run(90);
+        if w.agents[0].job.is_none() {
+            caught = true;
+            break;
+        }
+    }
+    assert!(caught, "必抓环境下十次作案应至少一次被抓");
+    // 社区服务已排入（可能已在执行——两种都算排上）。
+    let served = w.agents[0]
+        .exec_counts
+        .get("community_service")
+        .copied()
+        .unwrap_or(0);
+    let pending_or_doing = w.agents[0]
+        .current
+        .as_ref()
+        .map(|c| c.0 == "community_service")
+        .unwrap_or(false)
+        || w.agents[0].pending_command.as_deref() == Some("community_service");
+    assert!(
+        served > 0 || pending_or_doing,
+        "被抓后应去打扫公园（执行 {served} 次）"
+    );
+    // 被捕记忆：压制再犯（crime 标签乘数 < 1）。
+    assert!(w.agents[0]
+        .memory
+        .entries
+        .iter()
+        .any(|m| m.event == "被捕" && m.mults.get("crime").copied().unwrap_or(1.0) < 1.0));
+    // 日志能查到被抓的案底。
+    assert!(w.logger.buf.contains(r#""caught":true"#));
+}
+
+/// 传闻（技术文档 4.5）：受害者把被偷经历讲给第三者——负面记忆扩散。
+#[test]
+fn hearsay_spreads_crime_memory() {
+    let mut w = town_world(13, 4);
+    // 先让 1 号被 0 号偷一次（走真实结算）。
+    while living_core::time::hour_of(w.tick) != 22 {
+        w.tick();
+    }
+    w.agents[0].job = Some("thief".into());
+    for i in [0usize, 1] {
+        w.agents[i].needs = living_core::needs::Needs::full();
+        w.agents[i].current = None;
+    }
+    w.agents[1].wallet = 300.0;
+    w.teleport(0, (25.0, 4.0));
+    w.teleport(1, (25.2, 4.0));
+    w.agents[0].pending_command = Some("steal".into());
+    w.agents[0].next_heartbeat = w.tick + 1;
+    w.run(100);
+    assert!(w.agents[1].memory.entries.iter().any(|m| m.event == "被偷"));
+    // 受害者与 2 号电话聊一次。
+    while living_core::time::hour_of(w.tick) < 10 {
+        w.tick();
+    }
+    w.agents[1].current = None;
+    w.agents[1].pending_command = Some("phone_call".into());
+    w.agents[1].next_heartbeat = w.tick + 1;
+    w.set_bond(1, 2, 0.6);
+    w.run(60);
+    assert!(
+        w.agents[2]
+            .memory
+            .entries
+            .iter()
+            .any(|m| m.event == "传闻:被偷"),
+        "听过受害者倾诉的人应获得传闻记忆，实际：{:?}",
+        w.agents[2].memory.entries.iter().map(|m| m.event.clone()).collect::<Vec<_>>()
+    );
+}
+
+/// 职业转变（验收核心）：诚实度低 + 经济压力大的失业者会"走上歪路"；
+/// 就业充足时多数人一生不碰非法行当（对照同种子有岗位的世界）。
+#[test]
+fn job_market_driven_career_changes() {
+    // 岗位 21 < 人口 26：存在长期失业者——非法行当才有生存空间
+    //（就业充足时它被挤出，这正是设计稿"就业机会充足则多数人
+    // 一生不考虑非法职业"的机制表达）。
+    let mut w = town_world(17, 26);
+    // 布置主角处境：失业、不诚实、见底（其余居民自然生活、竞争岗位）。
+    w.agents[0].job = None;
+    w.agents[0].honesty = 0.08;
+    w.agents[0].wallet = 10.0;
+    let mut went_wrong = false;
+    for _ in 0..40 * 1440 {
+        w.tick();
+        if w.agents[0].job.as_deref() == Some("thief") {
+            went_wrong = true;
+            break;
+        }
+    }
+    assert!(
+        went_wrong,
+        "失业压力下不诚实者应在四十天内走上歪路（概率驱动，无剧本）"
+    );
+    // 对照：在岗、钱包健康的人不辞职去偷。
+    let stable = w
+        .agents
+        .iter()
+        .filter(|a| a.species == "human" && a.job.is_some() && a.job.as_deref() != Some("thief"))
+        .count();
+    assert!(stable >= 15, "在岗者应保持正当职业：{stable}");
+}
+
+/// 新闻生成：案发与职业变动都能转成小镇新闻（设计稿 6.3）。
+#[test]
+fn news_generated_from_town_events() {
+    let mut w = town_world(5, 26);
+    w.run(60 * 1440);
+    let name_of = |id: u32| -> String {
+        w.agents
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| format!("#{id}"))
+    };
+    let job_name_of = |j: &str| -> String {
+        w.cfg
+            .jobs
+            .iter()
+            .find(|x| x.id == j)
+            .map(|x| x.display_name().to_string())
+            .unwrap_or_else(|| j.to_string())
+    };
+    let mut news = Vec::new();
+    for line in w.logger.buf.lines() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            let ev = match v["t"].as_str().unwrap_or("") {
+                "theft" => Some(living_core::LogEvent::Theft {
+                    tick: v["tick"].as_u64().unwrap(),
+                    thief: v["thief"].as_u64().unwrap() as u32,
+                    victim: v["victim"].as_u64().unwrap() as u32,
+                    amount: v["amount"].as_f64().unwrap(),
+                    caught: v["caught"].as_bool().unwrap(),
+                    area: v["area"].as_str().unwrap().to_string(),
+                }),
+                _ => None,
+            };
+            if let Some(ev) = ev {
+                if let Some(t) = living_core::news::news_text(&ev, name_of, job_name_of) {
+                    news.push(t);
+                }
+            }
+        }
+    }
+    println!("[M5] 60 天新闻 {} 条，例如：", news.len());
+    for n in news.iter().take(3) {
+        println!("  {n}");
+    }
+    assert!(!news.is_empty(), "30 天的镇子应有新闻可播");
+}
+
+/// M5 验收：固定种子模拟一年——盗窃案发生、有人被抓、职业转变出现，
+/// 案发区域声誉有据可查（受控测试覆盖声誉链，这里锁总量分布）。
+#[test]
+fn town_year_statistical_acceptance() {
+    let mut w = town_world(5, 26);
+    w.logger.enabled = false; // 统计走 TownStats，不为断言跑巨型日志
+    w.run(365 * 1440);
+    let st = &w.stats;
+    println!(
+        "[M5 验收] 一年：盗窃 {} 起（被抓 {}），职业变动 {} 次",
+        st.thefts, st.thefts_caught, st.job_changes
+    );
+    assert!(st.thefts >= 10, "一年应有多起盗窃：{}", st.thefts);
+    assert!(st.thefts_caught >= 3, "应有人被抓：{}", st.thefts_caught);
+    assert!(st.job_changes >= 5, "应有职业转变：{}", st.job_changes);
+    // 经济没有崩溃：工作者的钱包在年末普遍为正，且没有全体赤贫。
+    let humans: Vec<&living_core::Agent> = w
+        .agents
+        .iter()
+        .filter(|a| a.species == "human")
+        .collect();
+    let solvent = humans.iter().filter(|a| a.wallet > 50.0).count();
+    assert!(solvent >= 12, "多数居民应保持偿付能力：{solvent}/26");
+}
+
+/// 一座镇的回放确定性（含经济、犯罪、职业流动的完整机制）。
+#[test]
+fn town_window_replay_deterministic() {
+    let script = |w: &mut World| {
+        w.run(45 * 1440);
+    };
+    let mut a = town_world(23, 12);
+    a.logger.enabled = false;
+    script(&mut a);
+    let mut b = town_world(23, 12);
+    b.logger.enabled = false;
+    script(&mut b);
+    assert_eq!(a.stats.thefts, b.stats.thefts, "同种子的盗窃数应一致");
+    assert_eq!(a.stats.job_changes, b.stats.job_changes);
+    let wa: Vec<f64> = a.agents.iter().map(|x| x.wallet.round()).collect();
+    let wb: Vec<f64> = b.agents.iter().map(|x| x.wallet.round()).collect();
+    assert_eq!(wa, wb, "同种子的钱包终态应一致");
 }

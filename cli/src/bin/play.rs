@@ -159,7 +159,17 @@ fn draw_panel(world: &World, player: &str) {
         None => "闲着（在想做什么）".to_string(),
     };
     println!("──────────────────────────────────────────────");
-    println!("🕐 {now}   👤 {player}（你）");
+    let job_title = match &a.job {
+        Some(j) => world
+            .cfg
+            .jobs
+            .iter()
+            .find(|x| x.id == *j)
+            .map(|x| x.display_name().to_string())
+            .unwrap_or_else(|| j.clone()),
+        None => "无业".to_string(),
+    };
+    println!("🕐 {now}   👤 {player}（你，{job_title}）  💰 {:.0} 元", a.wallet);
     println!("正在: {action}");
     println!("⚡ 意志力 {} {:>3.0}/100", bar(a.willpower), a.willpower);
     let n = &a.needs;
@@ -588,6 +598,55 @@ fn report(world: &World, player: &str, before: usize, banner: &str) {
                         salience
                     );
                 }
+            }
+            LogEvent::Theft {
+                tick,
+                thief,
+                victim,
+                amount,
+                caught,
+                ..
+            } => {
+                let who = name_of(*thief);
+                let target = name_of(*victim);
+                if *caught {
+                    println!(
+                        "   {} 🚨 {who}行窃被当场抓获，{amount:.0} 已归还 {target}，将做社区服务",
+                        format_clock(*tick)
+                    );
+                } else {
+                    println!(
+                        "   {} 🚨 {target}被盗 {amount:.0}（邻居们议论纷纷）",
+                        format_clock(*tick)
+                    );
+                }
+            }
+            LogEvent::JobChange {
+                tick,
+                agent,
+                from,
+                to,
+                reason,
+            } => {
+                let who = name_of(*agent);
+                let job_name = |j: &Option<String>| -> String {
+                    match j {
+                        Some(id) => world
+                            .cfg
+                            .jobs
+                            .iter()
+                            .find(|x| x.id == *id)
+                            .map(|x| x.display_name().to_string())
+                            .unwrap_or_else(|| id.clone()),
+                        None => "无业".to_string(),
+                    }
+                };
+                println!(
+                    "   {} 📰 {who}从{}变成了{}（{reason}）",
+                    format_clock(*tick),
+                    job_name(from),
+                    job_name(to)
+                );
             }
             LogEvent::Exposure {
                 tick,

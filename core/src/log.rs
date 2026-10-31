@@ -2,13 +2,13 @@
 //! 每行一个 JSON 对象，serde 派生序列化；BTreeMap 保证键序确定，日志字节级可比较。
 
 use crate::needs::Needs;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const LOG_VERSION: u32 = 4;
+pub const LOG_VERSION: u32 = 5;
 
 /// 决策的因素分解：系统能"报告原因"的载体。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactorBreakdown {
     /// 行为注册表基准权重。
     pub base: f64,
@@ -31,7 +31,7 @@ pub struct FactorBreakdown {
     pub habit_auto: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum LogEvent {
     Meta {
@@ -103,6 +103,9 @@ pub enum LogEvent {
         /// LOD 层级（M4）：0 完整 / 1 常规 / 2 背景。
         #[serde(default)]
         lod: u8,
+        /// 钱包（M5 经济曲线）。
+        #[serde(default)]
+        wallet: f64,
     },
     /// 玩家指令（意志节点）：先入日志再由核心下一拍处理，回放包含玩家操作。
     PlayerCommand {
@@ -160,6 +163,33 @@ pub enum LogEvent {
         /// true = 玩家主动下令违约；false = 意志力耗尽失守。
         commanded: bool,
     },
+    /// 案发（M5，设计稿 5.2）：盗窃行为的结算——无论得手还是被抓。
+    /// 新闻生成的素材源；因果链（受害者记忆 → 传闻 → 声誉）由后续事件承载。
+    Theft {
+        tick: u64,
+        thief: u32,
+        victim: u32,
+        amount: f64,
+        caught: bool,
+        /// 案发区域 ID。
+        area: String,
+    },
+    /// 职业变动（M5，设计稿 5.3）：入职、转行、被捕失业——全部概率驱动。
+    JobChange {
+        tick: u64,
+        agent: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        to: Option<String>,
+        reason: String,
+    },
+    /// 钱包变动（M5 经济）：工资入账与消费扣款。
+    Wallet {
+        tick: u64,
+        agent: u32,
+        delta: f64,
+        value: f64,
+    },
     /// 目标结束：到期（成功 = 零违约）或中途放弃（习惯反弹）。
     GoalEnd {
         tick: u64,
@@ -179,7 +209,7 @@ pub enum LogEvent {
 }
 
 /// 地点终态摘要（M3）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AreaSummary {
     pub id: String,
     pub reputation: f64,
@@ -187,7 +217,7 @@ pub struct AreaSummary {
     pub visits: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSummary {
     pub id: u32,
     pub name: String,
