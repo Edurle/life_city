@@ -1,8 +1,8 @@
-//! living-play —— M1 交互调试器：玩家的猫。
+//! living-play —— M2 交互调试器：玩家的猫与猫群。
 //!
-//! 上半屏状态面板（时间、当前行为、需求条、意志力、最近记忆），
+//! 上半屏状态面板（时间、当前行为、需求条、意志力、最近记忆、与其他猫的关系），
 //! 下方编号菜单：输入数字指挥猫（花意志力）、快进、退出。
-//! 每轮把期间发生的的事件打印出来——这就是"它想睡，你让它玩"的拉扯现场。
+//! 每轮把期间发生的的事件打印出来——包括猫群动态（惊吓、目睹、亲密变化）。
 //!
 //! 运行：cargo run -p living-cli --bin living-play -- --seed 42
 
@@ -27,8 +27,8 @@ fn main() {
     let load_path = get("--load", "");
     let save_path = get("--save", "logs/play_state.bin");
 
-    let json = std::fs::read_to_string(&assets)
-        .unwrap_or_else(|e| panic!("读取配置失败 {assets}: {e}"));
+    let json =
+        std::fs::read_to_string(&assets).unwrap_or_else(|e| panic!("读取配置失败 {assets}: {e}"));
     let cfg = load_config(&json).unwrap_or_else(|e| panic!("{e}"));
 
     let mut world = if load_path.is_empty() {
@@ -40,8 +40,8 @@ fn main() {
         w.run(600);
         w
     } else {
-        let bytes = std::fs::read(&load_path)
-            .unwrap_or_else(|e| panic!("读取存档失败 {load_path}: {e}"));
+        let bytes =
+            std::fs::read(&load_path).unwrap_or_else(|e| panic!("读取存档失败 {load_path}: {e}"));
         let mut w = World::from_save(cfg, &bytes).unwrap_or_else(|e| panic!("{e}"));
         w.collect_recent = true;
         println!("（已从存档恢复，从第 {} 天继续）", world_day(&w));
@@ -49,9 +49,11 @@ fn main() {
     };
 
     let player = world.agents[0].name.clone();
-    println!("== 《活城》M1 · 玩家的猫 ==  你指挥 {player}，其余猫自己生活。");
+    println!("== 《活城》M2 · 玩家的猫与猫群 ==  你指挥 {player}，其余猫自己生活。");
     println!("规则：指令永远可以下，但违背它意愿的指令要花更多意志力（⚡）；");
-    println!("      打断正在做的事额外 +8；意志力靠睡觉和慢慢回。输入数字回车。\n");
+    println!("      打断正在做的事额外 +8；意志力靠睡觉和慢慢回。输入数字回车。");
+    println!("      M2：同处一地的社交时光会拉近猫的关系；亲近的猫会目睹学习彼此的遭遇；");
+    println!("      你陪在胆小的猫身边，能安抚它的恐惧。输入数字回车。\n");
 
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
@@ -81,7 +83,10 @@ fn main() {
                 let s = &status[(k - 1) as usize];
                 let out = world.issue_command(0, &s.id);
                 if out.accepted {
-                    println!("👤 你让{player}去{}（⚡ -{:.0}）—— {}", s.name, out.cost, out.reason);
+                    println!(
+                        "👤 你让{player}去{}（⚡ -{:.0}）—— {}",
+                        s.name, out.cost, out.reason
+                    );
                 } else {
                     println!("👤 你让{player}去{} —— {}", s.name, out.reason);
                 }
@@ -138,17 +143,66 @@ fn draw_panel(world: &World, player: &str) {
     println!("正在: {action}");
     println!("⚡ 意志力 {} {:>3.0}/100", bar(a.willpower), a.willpower);
     let n = &a.needs;
-    println!("🍖 饥饿 {} {:>3.0}    💤 精力 {} {:>3.0}", bar(n.hunger), n.hunger, bar(n.energy), n.energy);
-    println!("🎾 娱乐 {} {:>3.0}    🫂 社交 {} {:>3.0}", bar(n.fun), n.fun, bar(n.social), n.social);
-    println!("🛁 卫生 {} {:>3.0}    🚽 膀胱 {} {:>3.0}", bar(n.hygiene), n.hygiene, bar(n.bladder), n.bladder);
+    println!(
+        "🍖 饥饿 {} {:>3.0}    💤 精力 {} {:>3.0}",
+        bar(n.hunger),
+        n.hunger,
+        bar(n.energy),
+        n.energy
+    );
+    println!(
+        "🎾 娱乐 {} {:>3.0}    🫂 社交 {} {:>3.0}",
+        bar(n.fun),
+        n.fun,
+        bar(n.social),
+        n.social
+    );
+    println!(
+        "🛁 卫生 {} {:>3.0}    🚽 膀胱 {} {:>3.0}",
+        bar(n.hygiene),
+        n.hygiene,
+        bar(n.bladder),
+        n.bladder
+    );
     let mut mems: Vec<_> = a.memory.entries.iter().collect();
     mems.sort_by(|x, y| y.strength.total_cmp(&x.strength));
     if !mems.is_empty() {
         println!("🧠 记忆:");
         for m in mems.iter().take(3) {
-            println!("   · {}（时段{}，强度{:.2}）", m.event, m.quarter, m.strength);
+            let kind = if m.vicarious {
+                "（目睹所学）"
+            } else {
+                ""
+            };
+            println!(
+                "   · {}（时段{}，强度{:.2}）{kind}",
+                m.event, m.quarter, m.strength
+            );
         }
     }
+    // 关系：与其他猫的亲密值
+    let bonds: Vec<(String, f64)> = {
+        let mut v: Vec<_> = world
+            .agents
+            .iter()
+            .skip(1)
+            .map(|o| (o.name.clone(), world.bond(0, o.id)))
+            .collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        v
+    };
+    let bond_str = bonds
+        .iter()
+        .map(|(n, b)| format!("{n} {:.2}", b))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let comfort = world.agent_comfort(0);
+    let comfort_str = if comfort > 0.05 {
+        format!("（同伴在身边，安全感 {:.1}）", comfort)
+    } else {
+        String::new()
+    };
+    println!("🫂 亲密：{bond_str}{comfort_str}");
     for other in world.agents.iter().skip(1) {
         let act = match &other.current {
             Some((bid, _, _)) => behavior_name(world, bid),
@@ -180,18 +234,64 @@ fn print_menu(status: &[BehaviorStatus]) {
     }
 }
 
-/// 打印 before 之后发生的事件（只报玩家的猫与全局环境事件）。
+/// 打印 before 之后发生的事件（玩家的猫、猫群动态与全局环境事件）。
 fn report(world: &World, player: &str, before: usize, banner: &str) {
     if !banner.is_empty() {
         println!("{banner}");
     }
     let start = before.min(world.recent_events.len());
+    let name_of = |id: u32| -> String {
+        world
+            .agents
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| format!("#{id}"))
+    };
     for ev in world.recent_events[start..].iter() {
         match ev {
-            LogEvent::EnvEvent { tick, event } => {
-                println!("   {} 🌍 发生了【{}】", format_clock(*tick), event);
+            LogEvent::EnvEvent { tick, event, .. } => {
+                let label = world
+                    .cfg
+                    .env_events
+                    .iter()
+                    .find(|e| e.id == *event)
+                    .map(|e| e.display_name().to_string())
+                    .unwrap_or_else(|| event.clone());
+                println!("   {} 🌍 发生了【{label}】", format_clock(*tick));
             }
-            LogEvent::PlayerCommand { tick, behavior, cost, accepted, .. } => {
+            LogEvent::Startled { tick, agent, event } => {
+                let who = name_of(*agent);
+                let label = world
+                    .cfg
+                    .env_events
+                    .iter()
+                    .find(|e| e.id == *event)
+                    .map(|e| e.display_name().to_string())
+                    .unwrap_or_else(|| event.clone());
+                println!(
+                    "   {} 😱 {who}被【{label}】吓了一跳，丢下了正在做的事",
+                    format_clock(*tick)
+                );
+            }
+            LogEvent::BondChange {
+                tick, a, b, value, ..
+            } => {
+                println!(
+                    "   {} 🫂 {}和{}更亲近了（现在 {:.2}）",
+                    format_clock(*tick),
+                    name_of(*a),
+                    name_of(*b),
+                    value
+                );
+            }
+            LogEvent::PlayerCommand {
+                tick,
+                behavior,
+                cost,
+                accepted,
+                ..
+            } => {
                 let mark = if *accepted { "✅" } else { "❌" };
                 println!(
                     "   {} 👤 指令【{}】⚡{:.0} {mark}",
@@ -200,7 +300,13 @@ fn report(world: &World, player: &str, before: usize, banner: &str) {
                     cost
                 );
             }
-            LogEvent::Decision { tick, agent, choice, factors, .. } if *agent == 0 => {
+            LogEvent::Decision {
+                tick,
+                agent,
+                choice,
+                factors,
+                ..
+            } if *agent == 0 => {
                 let src = if factors.will_command {
                     "你的指令"
                 } else if factors.forced {
@@ -208,20 +314,58 @@ fn report(world: &World, player: &str, before: usize, banner: &str) {
                 } else {
                     "它自己"
                 };
+                let comfort = if factors.comfort > 0.05 {
+                    format!("×安全感{:.1}", factors.comfort)
+                } else {
+                    String::new()
+                };
                 println!(
-                    "   {} 🐾 {player}开始【{}】（{src}｜权重{:.1}×需求{:.1}×记忆{:.1}）",
+                    "   {} 🐾 {player}开始【{}】（{src}｜权重{:.1}×需求{:.1}×记忆{:.1}{}）",
                     format_clock(*tick),
                     behavior_name(world, choice),
                     factors.weight,
                     factors.need_mult,
-                    factors.mem_mult
+                    factors.mem_mult,
+                    comfort
                 );
             }
-            LogEvent::ActionEnd { tick, agent, behavior } if *agent == 0 => {
-                println!("   {} ■ {}结束了【{}】", format_clock(*tick), player, behavior_name(world, behavior));
+            LogEvent::ActionEnd {
+                tick,
+                agent,
+                behavior,
+            } if *agent == 0 => {
+                println!(
+                    "   {} ■ {}结束了【{}】",
+                    format_clock(*tick),
+                    player,
+                    behavior_name(world, behavior)
+                );
             }
-            LogEvent::MemoryWrite { tick, agent, event, salience, .. } if *agent == 0 => {
-                println!("   {} 🧠 {player}记住了【{}】（显著性{:.2}）", format_clock(*tick), event, salience);
+            LogEvent::MemoryWrite {
+                tick,
+                agent,
+                event,
+                salience,
+                source,
+                vicarious,
+                ..
+            } => {
+                if *vicarious {
+                    // 目睹学习：谁看着谁的遭遇学到了什么（M2 猫群故事线）
+                    let who = name_of(*agent);
+                    let from = source.map(name_of).unwrap_or_default();
+                    println!(
+                        "   {} 🧠 {who}目睹了{from}的遭遇，也记住了【{event}】（显著性{:.2}）",
+                        format_clock(*tick),
+                        salience
+                    );
+                } else if *agent == 0 {
+                    println!(
+                        "   {} 🧠 {player}记住了【{event}】（显著性{:.2}）",
+                        format_clock(*tick),
+                        salience
+                    );
+                }
             }
             _ => {}
         }

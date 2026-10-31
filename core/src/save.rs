@@ -3,10 +3,11 @@
 //! 随机数生成器状态一并保存，读档后运行与连续运行完全一致（有测试保证）。
 //! 配置（assets/*.json）不进快照，读档时重新加载。
 
-use crate::agent::Agent;
 use crate::config::{BehaviorDef, SimConfig, SpotDef};
 use crate::log::Logger;
+use crate::relation::Relations;
 use crate::rng::Rng;
+use crate::space::SpatialGrid;
 use crate::time::Tick;
 use crate::world::World;
 use serde::{Deserialize, Serialize};
@@ -16,13 +17,15 @@ use std::collections::BTreeMap;
 pub struct SaveState {
     pub version: u32,
     pub tick: Tick,
-    pub agents: Vec<Agent>,
+    pub agents: Vec<crate::agent::Agent>,
+    pub relations: Relations,
+    pub grid: SpatialGrid,
     pub event_schedule: Vec<Tick>,
     pub world_rng: Rng,
     pub decisions_done: u64,
 }
 
-pub const SAVE_VERSION: u32 = 1;
+pub const SAVE_VERSION: u32 = 2;
 
 impl World {
     /// 导出二进制快照。
@@ -31,6 +34,8 @@ impl World {
             version: SAVE_VERSION,
             tick: self.tick,
             agents: self.agents.clone(),
+            relations: self.relations.clone(),
+            grid: self.grid.clone(),
             event_schedule: self.event_schedule.clone(),
             world_rng: self.world_rng.clone(),
             decisions_done: self.decisions_done,
@@ -53,12 +58,17 @@ impl World {
             .iter()
             .map(|b| (b.id.clone(), b.clone()))
             .collect();
-        let spots: BTreeMap<String, SpotDef> =
-            cfg.spots.iter().map(|s| (s.id.clone(), s.clone())).collect();
+        let spots: BTreeMap<String, SpotDef> = cfg
+            .spots
+            .iter()
+            .map(|s| (s.id.clone(), s.clone()))
+            .collect();
         Ok(World {
             tick: state.tick,
             cfg,
             agents: state.agents,
+            relations: state.relations,
+            grid: state.grid,
             behaviors,
             spots,
             event_schedule: state.event_schedule,

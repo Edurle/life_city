@@ -2,7 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>《活城》M0 日志回放查看器</title>
+<title>《活城》M2 日志回放查看器</title>
 <style>
   :root { --bg:#1b1e24; --panel:#242830; --line:#3a3f4b; --text:#d8dce4; --dim:#8a91a0; --accent:#7aa2f7; }
   * { box-sizing:border-box; }
@@ -32,12 +32,13 @@
   td.num { text-align:right; font-variant-numeric:tabular-nums; }
   .pos { color:#9ece6a; } .neg { color:#f7768e; }
   #memlist div { padding:3px 0; border-bottom:1px solid var(--line); font-size:12.5px; }
+  #groupFeed div, #bondList div { padding:3px 0; border-bottom:1px solid var(--line); font-size:12.5px; }
   .hint { color:var(--dim); }
 </style>
 </head>
 <body>
 <header>
-  <h1>《活城》M0 · 日志回放查看器</h1>
+  <h1>《活城》M2 · 日志回放查看器</h1>
   <label id="drop">拖入 .jsonl 日志文件，或点击选择<input id="file" type="file" accept=".jsonl" hidden></label>
   <span id="meta"></span>
 </header>
@@ -57,6 +58,7 @@ let scrubIdx = 0;
 function parseLog(text) {
   const agents = new Map();
   const envEvents = [];
+  const bondChanges = [];
   let meta = null;
   const lines = text.split("\n");
   for (const line of lines) {
@@ -65,6 +67,8 @@ function parseLog(text) {
     let ev; try { ev = JSON.parse(s); } catch { continue; }
     if (ev.t === "meta") { meta = ev; continue; }
     if (ev.t === "env_event") { envEvents.push(ev); continue; }
+    if (ev.t === "startled") { A(agents, ev.agent).startles.push(ev); continue; }
+    if (ev.t === "bond_change") { bondChanges.push(ev); continue; }
     if (ev.t === "snapshot") {
       A(agents, ev.agent).snapshots.push(ev); continue;
     }
@@ -80,11 +84,15 @@ function parseLog(text) {
     a.snapshots.sort((x,y)=>x.tick-y.tick);
     a.decisions.sort((x,y)=>x.tick-y.tick);
   }
-  return {agents, envEvents, meta};
+  return {agents, envEvents, bondChanges, meta};
 }
 function A(agents, id) {
-  if (!agents.has(id)) agents.set(id, {id, snapshots:[], decisions:[], commands:[], memWrites:[], summary:null});
+  if (!agents.has(id)) agents.set(id, {id, snapshots:[], decisions:[], commands:[], memWrites:[], startles:[], summary:null});
   return agents.get(id);
+}
+function nameOf(agents, id) {
+  const a = agents.get(id);
+  return (a && a.summary) ? a.summary.name : ("猫#"+id);
 }
 function fmtTick(t) { const d=Math.floor(t/1440)+1,h=Math.floor(t%1440/60),m=t%60; return `第${d}天 ${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`; }
 
@@ -147,6 +155,10 @@ function render() {
     <div class="card" style="flex:1;min-width:360px"><h3>行为占比（全部决策）</h3><canvas id="distC" width="620" height="240"></canvas></div>
     <div class="card" style="flex:1;min-width:360px"><h3>记忆写入（按显著性排序）</h3><div id="memlist"></div></div>
   </div>
+  <div class="row">
+    <div class="card" style="flex:1;min-width:360px"><h3>猫群动态（环境事件 · 惊吓 · 亲密变化，最近 40 条）</h3><div id="groupFeed"></div></div>
+    <div class="card" style="flex:1;min-width:360px"><h3>亲近关系（模拟结束时）</h3><div id="bondList"></div></div>
+  </div>
   <div class="card"><h3>决策流水与因素分解（最近 60 次决策 · 权重 = 代理权重 × 需求 × 记忆）</h3><div id="decTable"></div></div>`;
   main.innerHTML = html;
 
@@ -158,6 +170,8 @@ function render() {
   updateReadout();
   renderDist(ag);
   renderMems(ag);
+  renderGroupFeed();
+  renderBonds(ag);
   renderDecisions(ag);
 }
 
@@ -214,8 +228,40 @@ function renderMems(ag) {
   const sorted = [...ag.memWrites].sort((a,b)=>b.salience-a.salience).slice(0,20);
   el.innerHTML = sorted.length ? sorted.map(m=>{
     const mults = Object.entries(m.mults||{}).map(([k,v])=>`<span class="${v>1?'pos':'neg'}">${k}×${v}</span>`).join(" ");
-    return `<div>${fmtTick(m.tick)} · <b>${m.event}</b> · 显著性 ${m.salience.toFixed(2)} · ${mults}</div>`;
+    const src = m.vicarious
+      ? ` <span style="color:#e0af68">目睹 ${m.source!=null ? nameOf(DATA.agents, m.source) : "?"} 所学</span>`
+      : "";
+    return `<div>${fmtTick(m.tick)} · <b>${m.event}</b> · 显著性 ${m.salience.toFixed(2)}${src} · ${mults}</div>`;
   }).join("") : "<p class='hint'>本代理没有记忆写入。</p>";
+}
+
+/// 猫群动态：环境事件、惊吓、亲密变化的时间线（全局）。
+function renderGroupFeed() {
+  const el = document.getElementById("groupFeed");
+  const items = [];
+  for (const e of DATA.envEvents) items.push({tick:e.tick, html:`🌍 发生了【${e.event}】（位置 ${e.pos ? e.pos.map(v=>v.toFixed(1)).join(",") : "?"}）`});
+  for (const [id, a] of DATA.agents) {
+    for (const s of a.startles) items.push({tick:s.tick, html:`😱 <b>${nameOf(DATA.agents, id)}</b> 被【${s.event}】吓了一跳`});
+  }
+  for (const b of DATA.bondChanges || []) {
+    items.push({tick:b.tick, html:`🫂 ${nameOf(DATA.agents, b.a)} 和 ${nameOf(DATA.agents, b.b)} 更亲近了（${b.value.toFixed(2)}）`});
+  }
+  items.sort((x,y)=>y.tick-x.tick);
+  el.innerHTML = items.length ? items.slice(0,40).map(i=>`<div>${fmtTick(i.tick)} · ${i.html}</div>`).join("")
+    : "<p class='hint'>没有猫群动态（旧版日志或没有事件）。</p>";
+}
+
+/// 亲近关系：从汇总的 top_bonds 展示（模拟结束时点）。
+function renderBonds(ag) {
+  const el = document.getElementById("bondList");
+  const bonds = ag.summary && ag.summary.top_bonds;
+  el.innerHTML = bonds && bonds.length
+    ? bonds.map(([name, v])=>{
+        const pct = Math.round(v*100);
+        const filled = Math.round(v*20);
+        return `<div>${name} <span style="color:#7aa2f7">${v.toFixed(2)}</span> <span style="color:#3a3f4b">${"█".repeat(filled)}${"·".repeat(20-filled)}</span> ${pct}%</div>`;
+      }).join("")
+    : "<p class='hint'>没有关系数据（旧版日志）。</p>";
 }
 
 function renderDecisions(ag) {
@@ -227,17 +273,20 @@ function renderDecisions(ag) {
   ].sort((a,b)=>a.tick-b.tick).slice(-60).reverse();
   const rows = items.map(d=>{
     if (d.isCmd) {
-      return `<tr><td>${fmtTick(d.tick)}</td><td>▶ ${d.choice}</td><td class="num">—</td><td class="num">—</td><td class="num">⚡${d.cost.toFixed(0)}</td>
+      return `<tr><td>${fmtTick(d.tick)}</td><td>▶ ${d.choice}</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">⚡${d.cost.toFixed(0)}</td>
         <td class="${d.accepted?'pos':'neg'}">${d.accepted?'已执行':'被拒绝'}</td></tr>`;
     }
     const f = d.f;
+    const comfort = (f.comfort != null && f.comfort > 0.05)
+      ? `<span class="pos">🫂${f.comfort.toFixed(1)}</span>` : "—";
     return `<tr><td>${fmtTick(d.tick)}</td><td>${d.choice}</td>
       <td class="num">${f.weight.toFixed(2)}</td>
       <td class="num">${f.need_mult.toFixed(2)}</td>
       <td class="num ${f.mem_mult>1.05?'pos':f.mem_mult<0.95?'neg':''}">${f.mem_mult.toFixed(2)}</td>
+      <td class="num">${comfort}</td>
       <td>${f.forced ? "生理反射" : f.will_command ? "玩家指令" : "概率"}</td></tr>`;
   }).join("");
-  el.innerHTML = `<table><tr><th>时间</th><th>行为</th><th>代理权重</th><th>需求乘数</th><th>记忆/⚡</th><th>来源</th></tr>${rows}</table>`;
+  el.innerHTML = `<table><tr><th>时间</th><th>行为</th><th>代理权重</th><th>需求乘数</th><th>记忆</th><th>安全感/⚡</th><th>来源</th></tr>${rows}</table>`;
 }
 
 // ---------- 载入 ----------

@@ -90,10 +90,7 @@ mod tests {
 
     #[test]
     fn different_purpose_different_stream() {
-        assert_ne!(
-            derive_seed(7, 1, 0),
-            derive_seed(7, 1, 1),
-        );
+        assert_ne!(derive_seed(7, 1, 0), derive_seed(7, 1, 1),);
     }
 
     #[test]

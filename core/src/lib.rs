@@ -1,4 +1,4 @@
-//! living-core ——《活城》模拟核心（M0：一群猫）。
+//! living-core ——《活城》模拟核心（M2：猫群——空间、关系、模仿、泛化检索）。
 //!
 //! 架构铁律（见《技术选型与架构》）：
 //! - 本库不含任何界面代码，只读配置、只写日志；
@@ -10,8 +10,10 @@ pub mod config;
 pub mod log;
 pub mod memory;
 pub mod needs;
+pub mod relation;
 pub mod rng;
 pub mod save;
+pub mod space;
 pub mod time;
 pub mod tree;
 pub mod world;
@@ -19,6 +21,8 @@ pub mod world;
 pub use agent::Agent;
 pub use config::{load_config, SimConfig};
 pub use log::{AgentSummary, LogEvent, Logger};
+pub use relation::Relations;
 pub use rng::WorldSeed;
+pub use space::{Pos, SpatialGrid};
 pub use time::Tick;
 pub use world::{cat_names, tv_distance, BehaviorStatus, ChoiceInfo, CommandOutcome, World};

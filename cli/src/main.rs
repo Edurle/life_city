@@ -33,8 +33,8 @@ fn main() {
     let save_path = get("--save", "");
     let load_path = get("--load", "");
 
-    let json = std::fs::read_to_string(&assets)
-        .unwrap_or_else(|e| panic!("读取配置失败 {assets}: {e}"));
+    let json =
+        std::fs::read_to_string(&assets).unwrap_or_else(|e| panic!("读取配置失败 {assets}: {e}"));
     let cfg = load_config(&json).unwrap_or_else(|e| panic!("{e}"));
 
     let ticks = days * 1440;
@@ -43,10 +43,14 @@ fn main() {
         w.log_meta(seed, ticks);
         w
     } else {
-        let bytes = std::fs::read(&load_path)
-            .unwrap_or_else(|e| panic!("读取存档失败 {load_path}: {e}"));
+        let bytes =
+            std::fs::read(&load_path).unwrap_or_else(|e| panic!("读取存档失败 {load_path}: {e}"));
         let w = World::from_save(cfg, &bytes).unwrap_or_else(|e| panic!("{e}"));
-        println!("已从存档 {load_path} 恢复：第 {} 天起继续 {} 天", w.tick / 1440 + 1, days);
+        println!(
+            "已从存档 {load_path} 恢复：第 {} 天起继续 {} 天",
+            w.tick / 1440 + 1,
+            days
+        );
         w
     };
     let t0 = Instant::now();
@@ -67,7 +71,11 @@ fn main() {
     // M0 验收：同初始条件的猫分化 + 系统报告原因。
     println!("=== 行为分布（与 0 号猫的总变差距离） ===");
     for s in &summaries {
-        let mut top: Vec<(String, f64)> = s.distribution.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let mut top: Vec<(String, f64)> = s
+            .distribution
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
         top.sort_by(|a, b| b.1.total_cmp(&a.1));
         let top3: Vec<String> = top
             .iter()
@@ -92,8 +100,7 @@ fn main() {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        std::fs::write(&path, world.to_save())
-            .unwrap_or_else(|e| panic!("写存档失败: {e}"));
+        std::fs::write(&path, world.to_save()).unwrap_or_else(|e| panic!("写存档失败: {e}"));
         println!("存档已写入 {}", path.display());
     }
 
@@ -106,7 +113,10 @@ fn main() {
             .logger
             .write_to_file(&path)
             .unwrap_or_else(|e| panic!("写日志失败: {e}"));
-        println!("\n日志已写入 {}（用 viewer/index.html 打开查看）", path.display());
+        println!(
+            "\n日志已写入 {}（用 viewer/index.html 打开查看）",
+            path.display()
+        );
     }
 }
 

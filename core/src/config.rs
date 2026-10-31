@@ -36,6 +36,78 @@ pub struct Params {
     pub memory_top_k: usize,
     /// 初始权重的个体抖动范围（±比例）。
     pub weight_jitter: f64,
+    /// 房间尺寸（米）：事件位置采样与坐标边界。
+    #[serde(default = "d_room")]
+    pub room_width: f64,
+    #[serde(default = "d_room")]
+    pub room_height: f64,
+    /// 目睹半径（米）：同伴的显著反应在这个距离内可被看见（一间房内都能看见）。
+    #[serde(default = "d_witness_radius")]
+    pub witness_radius: f64,
+    /// 舒适半径（米）：信任的同伴在这个距离内提供安全感。
+    #[serde(default = "d_comfort_radius")]
+    pub comfort_radius: f64,
+    /// 安全感上限：亲密值 1 的同伴在身边时，负面记忆影响力的最大压制比例。
+    #[serde(default = "d_comfort_max")]
+    pub comfort_max: f64,
+    /// 安全感生效的最低亲密值：低于此值的同伴不提供安全感
+    /// （初始随机熟悉度不应让满屋猫互相安慰）。
+    #[serde(default = "d_comfort_min_bond")]
+    pub comfort_min_bond: f64,
+    /// 模仿折扣：目睹学到的强度 = 事件强度 × 亲密值 × 该系数（观察不如亲历）。
+    #[serde(default = "d_imitation_factor")]
+    pub imitation_factor: f64,
+    /// 模仿门槛：亲密值低于此值的同伴，其遭遇不值得学
+    /// （初始随机熟悉度不应让全屋猫互通消息）。
+    #[serde(default = "d_imitation_min_bond")]
+    pub imitation_min_bond: f64,
+    /// 惊吓打断的显著性门槛：只有足够新颖的强负面事件才打断当前行为
+    /// （第一次吸尘器真吓人；习惯化之后只是"又来了"，个性轨迹得以延续）。
+    #[serde(default = "d_startle_min_salience")]
+    pub startle_min_salience: f64,
+    /// 共同度过社交时光（同地点完成社交行为）的亲密值增长。
+    #[serde(default = "d_bond_social_gain")]
+    pub bond_social_gain: f64,
+    /// 涉及玩家角色的社交时光增长更快（玩家的陪伴更用心）。
+    #[serde(default = "d_bond_player_gain")]
+    pub bond_player_gain: f64,
+    /// 同屋代理的初始熟悉度上限（U(0, 此值)）：同屋檐下有点眼熟，但算不上亲近。
+    #[serde(default = "d_initial_bond_max")]
+    pub initial_bond_max: f64,
+}
+
+fn d_room() -> f64 {
+    6.0
+}
+fn d_witness_radius() -> f64 {
+    10.0
+}
+fn d_comfort_radius() -> f64 {
+    2.0
+}
+fn d_comfort_max() -> f64 {
+    0.8
+}
+fn d_comfort_min_bond() -> f64 {
+    0.35
+}
+fn d_imitation_factor() -> f64 {
+    0.7
+}
+fn d_imitation_min_bond() -> f64 {
+    0.25
+}
+fn d_startle_min_salience() -> f64 {
+    0.6
+}
+fn d_bond_social_gain() -> f64 {
+    0.08
+}
+fn d_bond_player_gain() -> f64 {
+    0.15
+}
+fn d_initial_bond_max() -> f64 {
+    0.3
 }
 
 /// 行为注册表条目：树只引用行为 ID，引擎解释声明执行。
@@ -91,27 +163,37 @@ impl BehaviorDef {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TreeNode {
-    Selector { children: Vec<TreeNode> },
+    Selector {
+        children: Vec<TreeNode>,
+    },
     Gate {
         need: String,
         below: f64,
         child: Box<TreeNode>,
     },
-    Action { behavior: String },
+    Action {
+        behavior: String,
+    },
 }
 
-/// 地点（M0 为房间内的几个位置，带特征标签供记忆匹配）。
+/// 地点：房间内的位置，带特征标签供记忆匹配。M2 起有坐标（米）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpotDef {
     pub id: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
 }
 
-/// 环境事件：按间隔随机发生，写入目击代理的记忆。
+/// 环境事件：按间隔随机发生，在发生位置的影响半径内写入目击代理的记忆。
 #[derive(Debug, Clone, Deserialize)]
 pub struct EnvEventDef {
     pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     pub interval_min: u64,
@@ -119,6 +201,9 @@ pub struct EnvEventDef {
     /// 情绪效价（-1..1）与强度（0..1），参与显著性计算。
     pub valence: f64,
     pub intensity: f64,
+    /// 影响半径（米）；0 = 全房间（如阳光、零食时间这种全域事件）。
+    #[serde(default)]
+    pub radius: f64,
     /// 对行为标签的权重乘数（如 {"hide": 5}）。
     #[serde(default)]
     pub behavior_mults: BTreeMap<String, f64>,
@@ -127,9 +212,14 @@ pub struct EnvEventDef {
     pub immune_behavior_tags: Vec<String>,
 }
 
+impl EnvEventDef {
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.id)
+    }
+}
+
 pub fn load_config(json: &str) -> Result<SimConfig, String> {
-    let cfg: SimConfig =
-        serde_json::from_str(json).map_err(|e| format!("配置解析失败: {e}"))?;
+    let cfg: SimConfig = serde_json::from_str(json).map_err(|e| format!("配置解析失败: {e}"))?;
     validate(&cfg)?;
     Ok(cfg)
 }
@@ -163,6 +253,9 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
         }
         if e.interval_min == 0 {
             return Err(format!("事件 {} 间隔下限应大于 0", e.id));
+        }
+        if e.radius < 0.0 {
+            return Err(format!("事件 {} 半径不应为负", e.id));
         }
     }
     Ok(())

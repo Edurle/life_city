@@ -24,11 +24,11 @@ pub fn quarter_of_day(tick: Tick) -> u8 {
 }
 
 pub fn is_hour_boundary(tick: Tick) -> bool {
-    tick % TICKS_PER_HOUR == 0
+    tick.is_multiple_of(TICKS_PER_HOUR)
 }
 
 pub fn is_day_boundary(tick: Tick) -> bool {
-    tick % TICKS_PER_DAY == 0 && tick > 0
+    tick.is_multiple_of(TICKS_PER_DAY) && tick > 0
 }
 
 /// 人类可读时间，用于日志与查看器。

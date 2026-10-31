@@ -12,11 +12,12 @@ fn test_config(noisy: bool) -> String {
     {
       "id": "vacuum_cleaner",
       "tags": ["noise"],
-      "interval_min": 120,
-      "interval_max": 240,
+      "radius": 2.5,
+      "interval_min": 480,
+      "interval_max": 960,
       "valence": -0.9,
-      "intensity": 0.9,
-      "behavior_mults": { "hide": 5.0, "explore": 0.3, "play": 0.4 },
+      "intensity": 0.5,
+      "behavior_mults": { "hide": 3.0, "explore": 0.5, "play": 0.6 },
       "immune_behavior_tags": ["hide"]
     }"#
     } else {
@@ -101,22 +102,32 @@ fn same_seed_produces_identical_logs() {
 
 #[test]
 fn identical_cats_diverge_through_experience() {
+    // M0 验收：同初始条件的猫经历不同事件后行为分布显著分化。
+    // 个性吸引子成形有轨迹运气成分，因此对多个种子统计：
+    // 每个种子取两两总变差距离的最大值（任意一对猫显著不同即算分化）。
     let json = &test_config(true);
-    let mut w = run_once(json, 7, 6, 10);
-    let summaries = w.summarize();
-    // 排除 0 号（TV 恒为 0）；要求至少一半的猫与 0 号分布差异达到可测量水平。
-    let diverged = summaries
-        .iter()
-        .skip(1)
-        .filter(|s| s.tv_distance_to_first > 0.15)
-        .count();
+    let mut diverged_seeds = 0;
+    for seed in [3u64, 7, 11, 21, 42] {
+        let mut w = run_once(json, seed, 6, 10);
+        let summaries = w.summarize();
+        let mut max_pair_tv = 0.0f64;
+        for i in 0..summaries.len() {
+            for j in (i + 1)..summaries.len() {
+                let d = living_core::tv_distance(
+                    &summaries[i].distribution,
+                    &summaries[j].distribution,
+                );
+                max_pair_tv = max_pair_tv.max(d);
+            }
+        }
+        if max_pair_tv > 0.3 {
+            diverged_seeds += 1;
+        }
+        println!("[分化] 种子 {seed}：两两最大 TV={max_pair_tv:.3}");
+    }
     assert!(
-        diverged >= 2,
-        "应有至少 2 只猫与 0 号显著分化（实际 {diverged}），TV: {:?}",
-        summaries
-            .iter()
-            .map(|s| s.tv_distance_to_first)
-            .collect::<Vec<_>>()
+        diverged_seeds >= 4,
+        "5 个种子里应有至少 4 个出现显著分化（实际 {diverged_seeds}）"
     );
 }
 
@@ -127,7 +138,9 @@ fn frightening_events_raise_hiding_share() {
 
     fn avg_hide(w: &mut World) -> f64 {
         let s = w.summarize();
-        s.iter().map(|x| x.distribution.get("hide_box").copied().unwrap_or(0.0)).sum::<f64>()
+        s.iter()
+            .map(|x| x.distribution.get("hide_box").copied().unwrap_or(0.0))
+            .sum::<f64>()
             / s.len() as f64
     }
     let noisy_share = avg_hide(&mut noisy);
@@ -172,11 +185,21 @@ fn memory_query_shifts_softmax_toward_hide() {
     let mut mults = BTreeMap::new();
     mults.insert("hide".to_string(), 5.0);
     mults.insert("explore".to_string(), 0.3);
-    let s = a.memory.write("vacuum", &["noise".into()], 3, 0.9, 1.0, mults, 100);
+    let s = a.memory.write(
+        "vacuum",
+        &["noise".into()],
+        3,
+        0.9,
+        1.0,
+        -0.9,
+        false,
+        mults,
+        100,
+    );
     assert!(s > 0.5);
 
     // 夜晚时段下，hide 相对 explore 的选择概率应大幅上升。
-    let mem_map = a.memory.query(3, &[]);
+    let mem_map = a.memory.query(3, &[], 0.0);
     let hide_m = mem_map.get("hide").copied().unwrap_or(1.0);
     let explore_m = mem_map.get("explore").copied().unwrap_or(1.0);
     let w_hide = 1.0 * hide_m;
@@ -279,7 +302,11 @@ fn interrupting_costs_extra_willpower() {
     // 空闲时下指令 vs 正做事时下同一指令。
     let idle_cost = {
         let status = w.behaviors_status(0);
-        status.iter().find(|s| s.available).map(|s| s.id.clone()).unwrap()
+        status
+            .iter()
+            .find(|s| s.available)
+            .map(|s| s.id.clone())
+            .unwrap()
     };
     let out_idle = w.issue_command(0, &idle_cost);
     w.run(3); // 开始执行
@@ -291,7 +318,11 @@ fn interrupting_costs_extra_willpower() {
         .find(|s| s.available && s.id != idle_cost)
         .map(|s| s.id.clone())
         .unwrap();
-    let est = status.iter().find(|s| s.id == other).map(|s| s.est_cost).unwrap();
+    let est = status
+        .iter()
+        .find(|s| s.id == other)
+        .map(|s| s.est_cost)
+        .unwrap();
     let out_interrupt = w.issue_command(0, &other);
     assert!(out_interrupt.accepted);
     // 打断成本 = 基础成本 + 8（四舍五入后允许 1 点误差）。
@@ -320,7 +351,8 @@ fn save_load_resumes_identically() {
     let mut b = World::from_save(load_config(json).unwrap(), &bytes).unwrap();
     b.run(600);
     assert_eq!(
-        b.logger.buf, a.logger.buf[offset..],
+        b.logger.buf,
+        a.logger.buf[offset..],
         "读档继续的日志应与连续运行完全一致（随机数状态必须存进快照）"
     );
 }
@@ -403,4 +435,336 @@ fn m1_acceptance_sleepy_cat_story() {
     let refused = w.issue_command(0, "explore_room");
     assert!(!refused.accepted);
     println!("[M1 验收] 意志力归零后：{}", refused.reason);
+}
+
+// ---------- M2：猫群——空间、关系、模仿、陪伴 ----------
+
+/// M2 测试配置：带坐标的房间 + 沙发（社交）+ 局部半径的吸尘器。
+/// 吸尘器间隔设为极大值——测试用手动触发（trigger_env_event），排除随机排程干扰。
+fn m2_config() -> String {
+    r#"{
+  "needs": {"hunger": 4.5, "energy": 3.0, "fun": 5.0, "social": 3.0, "hygiene": 2.0, "bladder": 4.0},
+  "critical_need": 15,
+  "params": {
+    "alpha": 0.06, "habit_decay_hourly": 0.02,
+    "temperature_min": 0.7, "temperature_max": 1.4,
+    "heartbeat_min": 5, "heartbeat_max": 20,
+    "memory_cap": 500, "memory_top_k": 8, "weight_jitter": 0.1,
+    "room_width": 6.0, "room_height": 6.0,
+    "witness_radius": 10.0, "comfort_radius": 2.0, "comfort_max": 0.8,
+    "imitation_factor": 0.7, "imitation_min_bond": 0.25,
+    "startle_min_salience": 0.6,
+    "bond_social_gain": 0.08, "bond_player_gain": 0.15, "initial_bond_max": 0.3
+  },
+  "spots": [
+    {"id": "bowl", "tags": ["food"], "x": 1.0, "y": 4.5},
+    {"id": "bed", "tags": ["quiet", "soft"], "x": 4.5, "y": 1.0},
+    {"id": "windowsill", "tags": ["sun", "view"], "x": 0.3, "y": 3.0},
+    {"id": "box", "tags": ["hide", "quiet"], "x": 0.5, "y": 0.5},
+    {"id": "sofa", "tags": ["soft", "social"], "x": 3.0, "y": 5.5}
+  ],
+  "behaviors": [
+    {"id": "eat", "base_weight": 3.0, "duration_min": 10, "duration_max": 30,
+     "effects": {"hunger": 50, "energy": 5}, "tags": ["food"], "spot": "bowl",
+     "gate_need": "hunger", "gate_below": 70},
+    {"id": "sleep", "base_weight": 3.0, "duration_min": 90, "duration_max": 240,
+     "effects": {"energy": 55}, "tags": ["sleep", "quiet"], "spot": "bed",
+     "gate_need": "energy", "gate_below": 45},
+    {"id": "nap_windowsill", "base_weight": 2.2, "duration_min": 30, "duration_max": 90,
+     "effects": {"energy": 28, "fun": 8}, "tags": ["sleep", "sun"], "spot": "windowsill",
+     "gate_need": "energy", "gate_below": 70},
+    {"id": "play", "base_weight": 1.6, "duration_min": 15, "duration_max": 45,
+     "effects": {"fun": 32, "energy": -8}, "tags": ["play"]},
+    {"id": "hide_box", "base_weight": 1.0, "duration_min": 20, "duration_max": 60,
+     "effects": {"energy": 12, "fun": 4}, "tags": ["hide", "quiet"], "spot": "box"},
+    {"id": "explore_room", "base_weight": 1.0, "duration_min": 10, "duration_max": 30,
+     "effects": {"fun": 10, "energy": -4}, "tags": ["explore"]},
+    {"id": "cuddle_sofa", "base_weight": 1.5, "duration_min": 10, "duration_max": 30,
+     "effects": {"social": 32, "fun": 5}, "tags": ["social"], "spot": "sofa",
+     "gate_need": "social", "gate_below": 60}
+  ],
+  "tree": {
+    "type": "selector",
+    "children": [
+      {"type": "gate", "need": "hunger", "below": 70, "child": {"type": "action", "behavior": "eat"}},
+      {"type": "gate", "need": "energy", "below": 45, "child": {"type": "action", "behavior": "sleep"}},
+      {"type": "gate", "need": "energy", "below": 70, "child": {"type": "action", "behavior": "nap_windowsill"}},
+      {"type": "gate", "need": "social", "below": 60, "child": {"type": "action", "behavior": "cuddle_sofa"}},
+      {"type": "action", "behavior": "play"},
+      {"type": "action", "behavior": "hide_box"},
+      {"type": "action", "behavior": "explore_room"}
+    ]
+  },
+  "env_events": [
+    {
+      "id": "vacuum_cleaner", "name": "吸尘器",
+      "tags": ["noise"], "radius": 2.5,
+      "interval_min": 1000000, "interval_max": 1000000,
+      "valence": -0.9, "intensity": 0.9,
+      "behavior_mults": {"hide": 5.0, "explore": 0.3, "play": 0.4},
+      "immune_behavior_tags": ["hide"]
+    }
+  ]
+}"#.to_string()
+}
+
+/// 惊吓：足够新颖的强负面事件打断当前行为并立即重新决策。
+#[test]
+fn startle_interrupts_current_behavior() {
+    let cfg = load_config(&m2_config()).unwrap();
+    let mut w = World::new(cfg, 5, cat_names(1), true);
+    w.collect_recent = true;
+    // 等猫开始做某件事。
+    for _ in 0..3000 {
+        w.tick();
+        if w.agents[0].current.is_some() {
+            break;
+        }
+    }
+    assert!(w.agents[0].current.is_some(), "猫应该开始做事了");
+    // 在猫的位置触发吸尘器（首次，显著性 0.9 ≥ 惊吓门槛 0.6）。
+    let pos = w.agent_pos(0).unwrap();
+    w.trigger_env_event(0, pos);
+    assert!(w.agents[0].current.is_none(), "惊吓应打断当前行为");
+    assert!(
+        w.recent_events
+            .iter()
+            .any(|e| matches!(e, living_core::LogEvent::Startled { .. })),
+        "应有惊吓日志"
+    );
+    // 下一拍立即重新决策。
+    w.tick();
+    assert!(w.agents[0].current.is_some(), "被吓到的猫应立刻重新决策");
+}
+
+/// 躲藏中的猫不受吸尘器影响（免疫），也不会被惊吓。
+#[test]
+fn hiding_cat_is_immune() {
+    let cfg = load_config(&m2_config()).unwrap();
+    let mut w = World::new(cfg, 5, cat_names(1), true);
+    w.collect_recent = true;
+    w.agents[0].pending_command = Some("hide_box".into());
+    w.agents[0].next_heartbeat = w.tick + 1;
+    w.run(2);
+    assert_eq!(w.agents[0].current.as_ref().unwrap().0, "hide_box");
+    let mem_before = w.agents[0].memory.entries.len();
+    let pos = w.agent_pos(0).unwrap();
+    w.trigger_env_event(0, pos);
+    assert!(w.agents[0].current.is_some(), "躲着的猫不应被打断");
+    assert_eq!(
+        w.agents[0].memory.entries.len(),
+        mem_before,
+        "免疫 = 不写入记忆"
+    );
+}
+
+/// 目睹传播（模仿节点）：亲近的猫目睹同伴被吓会学到间接记忆，陌生猫不会。
+#[test]
+fn vicarious_memory_spread_through_bond() {
+    let cfg = load_config(&m2_config()).unwrap();
+    let mut w = World::new(cfg, 5, cat_names(3), true);
+    w.collect_recent = true;
+    // 0=目击者，1=受害者，2=陌生对照。清除全部初始关系，只留 0-1 亲密。
+    w.set_bond(0, 1, 0.9);
+    w.set_bond(0, 2, 0.0);
+    w.set_bond(1, 2, 0.0);
+    // 受害者在纸箱附近；目击者在房间另一头（吸尘器半径外 → 无直接经历，
+    // 但目睹半径覆盖全房间 → 能看见受害者的反应）；对照猫也远离。
+    w.teleport(1, (0.5, 0.5));
+    w.teleport(0, (5.5, 5.0));
+    w.teleport(2, (5.0, 1.0));
+    w.trigger_env_event(0, (0.5, 0.5));
+    // 0 号学到间接记忆，1 号直接经历，2 号什么都没有。
+    let has = |id: usize, sub: &str| {
+        w.agents[id]
+            .memory
+            .entries
+            .iter()
+            .any(|m| m.event.contains(sub))
+    };
+    assert!(has(1, "vacuum"), "受害者应有直接记忆");
+    assert!(has(0, "目睹:vacuum"), "亲密目击者应有间接记忆");
+    assert!(
+        !has(0, "event")
+            || !w.agents[0]
+                .memory
+                .entries
+                .iter()
+                .any(|m| m.event == "vacuum_cleaner"),
+        "目击者在半径外不应有直接记忆"
+    );
+    assert!(
+        w.agents[0]
+            .memory
+            .entries
+            .iter()
+            .all(|m| m.vicarious || m.event != "vacuum_cleaner"),
+        "目击者的吸尘器记忆必须是间接的"
+    );
+    assert!(
+        !has(2, "vacuum") && !has(2, "目睹"),
+        "陌生对照猫不应学到任何东西"
+    );
+    // 日志能报告原因（目睹来源）。
+    assert!(w.recent_events.iter().any(|e| matches!(
+        e,
+        living_core::LogEvent::MemoryWrite {
+            vicarious: true,
+            source: Some(1),
+            ..
+        }
+    )));
+}
+
+/// M2 验收一：目睹同伴被吸尘器惊吓后，目击者的躲藏占比显著上升
+/// （对比同种子无亲密关系的世界，差异只能来自目睹所学）。
+/// 场景：四个时段各目睹一次（不同时段的遭遇写进不同记忆槽）。
+#[test]
+fn witnessed_fear_raises_hiding_share() {
+    let hide_share = |bond: f64, seed: u64| -> f64 {
+        let cfg = load_config(&m2_config()).unwrap();
+        let mut w = World::new(cfg, seed, cat_names(3), false);
+        w.set_bond(0, 1, bond);
+        w.set_bond(0, 2, 0.0);
+        w.set_bond(1, 2, 0.0);
+        w.teleport(1, (0.5, 0.5));
+        w.teleport(0, (5.5, 5.0));
+        w.teleport(2, (5.0, 1.0));
+        // 先跑一小段让猫安顿下来，再在四个时段各触发一次。
+        w.run(600);
+        for _ in 0..4 {
+            w.run(360);
+            w.agents[1].current = None; // 受害者若在躲藏会免疫（无可目睹反应），排除
+            w.teleport(1, (0.5, 0.5)); // 受害者可能已移动，固定回事发点
+            w.trigger_env_event(0, (0.5, 0.5));
+        }
+        w.run(3 * 1440);
+        let total: u64 = w.agents[0].exec_counts.values().sum();
+        w.agents[0]
+            .exec_counts
+            .get("hide_box")
+            .copied()
+            .unwrap_or(0) as f64
+            / total as f64
+    };
+    // 多种子取均值，排除单条轨迹的噪声。
+    let seeds = [5u64, 9, 13, 17];
+    let mut close = 0.0;
+    let mut stranger = 0.0;
+    for &s in &seeds {
+        close += hide_share(0.9, s);
+        stranger += hide_share(0.0, s);
+    }
+    close /= seeds.len() as f64;
+    stranger /= seeds.len() as f64;
+    println!("[M2 验收] 四时段目睹后的躲藏占比：亲密 {close:.3} vs 陌生 {stranger:.3}");
+    assert!(
+        close > stranger + 0.05,
+        "目睹亲近同伴被惊吓应显著提高躲藏占比：{close:.3} vs {stranger:.3}"
+    );
+}
+
+/// M2 验收二：玩家的陪伴降低恐惧的影响（安全感压制负面记忆）。
+#[test]
+fn companionship_reduces_avoidance() {
+    let make = || {
+        let cfg = load_config(&m2_config()).unwrap();
+        let mut w = World::new(cfg, 5, cat_names(2), true);
+        w.set_player(0);
+        w.set_bond(0, 1, 1.0);
+        w.teleport(1, (3.0, 3.0));
+        w
+    };
+    // 独处：玩家在房间另一头。
+    let mut alone = make();
+    alone.teleport(0, (0.2, 0.2));
+    alone.trigger_env_event(0, (3.0, 3.0));
+    // 陪伴：玩家就在身边。
+    let mut accompanied = make();
+    accompanied.teleport(0, (3.2, 3.0));
+    accompanied.trigger_env_event(0, (3.0, 3.0));
+
+    let comfort_alone = alone.agent_comfort(1);
+    let comfort_with = accompanied.agent_comfort(1);
+    assert!((comfort_alone - 0.0).abs() < 1e-9, "玩家不在身边应无安全感");
+    assert!(
+        (comfort_with - 0.8).abs() < 1e-9,
+        "亲密 1.0 的玩家在身边应给满安全感 0.8"
+    );
+
+    let mem_mult = |w: &mut World| -> f64 {
+        w.debug_options(1)
+            .iter()
+            .find(|o| o.behavior == "hide_box")
+            .unwrap()
+            .mem_mult
+    };
+    let afraid_alone = mem_mult(&mut alone);
+    let afraid_comforted = mem_mult(&mut accompanied);
+    println!(
+        "[M2 验收] 直接被吸尘器吓到后，躲藏记忆乘数：独处 {afraid_alone:.2} vs 陪伴 {afraid_comforted:.2}（安全感 {comfort_with}）"
+    );
+    assert!(
+        afraid_comforted < afraid_alone * 0.6,
+        "玩家陪伴应显著压制恐惧记忆：{afraid_alone:.2} -> {afraid_comforted:.2}"
+    );
+    // 两只猫都真的写了恐惧记忆（对照有效）。
+    assert!(alone.agents[1]
+        .memory
+        .entries
+        .iter()
+        .any(|m| m.event == "vacuum_cleaner"));
+}
+
+/// 共同度过社交时光（同地点完成社交行为）增长亲密值。
+#[test]
+fn bond_grows_on_shared_social_behavior() {
+    let cfg = load_config(&m2_config()).unwrap();
+    let mut w = World::new(cfg, 5, cat_names(2), true);
+    w.collect_recent = true;
+    // 两只猫社交需求都低（门开），同一拍开始蹭沙发。
+    for a in w.agents.iter_mut() {
+        a.needs.social = 30.0;
+        a.pending_command = Some("cuddle_sofa".into());
+        a.next_heartbeat = w.tick + 1;
+    }
+    let before = w.bond(0, 1);
+    w.run(60);
+    let after = w.bond(0, 1);
+    assert!(
+        after > before,
+        "同处沙发的社交行为应增长亲密：{before} -> {after}"
+    );
+    assert!(
+        w.recent_events
+            .iter()
+            .any(|e| matches!(e, living_core::LogEvent::BondChange { .. })),
+        "应有亲密变化日志"
+    );
+}
+
+/// M2 存档回环：关系与位置进快照，读档后运行与连续运行一致。
+#[test]
+fn save_load_m2_roundtrip() {
+    let json = m2_config();
+    let cfg = load_config(&json).unwrap();
+    let mut a = World::new(cfg.clone(), 5, cat_names(3), true);
+    a.run(600);
+    a.set_bond(0, 1, 0.77);
+    a.teleport(2, (1.5, 2.5));
+    let bytes = a.to_save();
+    let mut b = World::from_save(cfg, &bytes).unwrap();
+    assert_eq!(b.bond(0, 1), 0.77, "亲密值应进快照");
+    assert_eq!(b.agent_pos(2), Some((1.5, 2.5)), "位置应进快照");
+    // 继续运行日志一致（网格从位置重建，不影响确定性）。
+    let offset = a.logger.buf.len();
+    a.trigger_env_event(0, (3.0, 3.0));
+    b.trigger_env_event(0, (3.0, 3.0));
+    a.run(500);
+    b.run(500);
+    assert_eq!(
+        b.logger.buf,
+        a.logger.buf[offset..],
+        "读档继续的日志应与连续运行一致"
+    );
 }

@@ -2,7 +2,7 @@
 
 概率行为树驱动的第一人称生活模拟游戏《活城》。设计文档在 Obsidian：`Obsidian Vault/city_life_simulator/`。
 
-## 构建（M0：一群猫）
+## 构建（M2：猫群——空间、关系、模仿、陪伴）
 
 ```bash
 cargo build --workspace
@@ -19,7 +19,7 @@ cargo run -p living-cli -- --seed 42 --cats 6 --days 7 --assets assets/cats.json
 cargo run -p living-cli -- --seed 42 --cats 6 --days 3 --save logs/state.bin
 cargo run -p living-cli -- --load logs/state.bin --days 4 --out logs/demo2.jsonl
 
-# 交互调试器（玩家的猫：输数字指挥，实时反馈；退出自动存档，--load 续玩）
+# 交互调试器（玩家的猫与猫群：输数字指挥，实时反馈；退出自动存档，--load 续玩）
 cargo run -p living-cli --bin living-play -- --seed 42
 cargo run -p living-cli --bin living-play -- --load logs/play_state.bin
 
@@ -29,11 +29,11 @@ cargo run -p living-cli --release -- --bench
 
 ## 查看日志
 
-浏览器打开 `viewer/index.html`，拖入 `logs/*.jsonl`：时间轴回放、需求曲线、权重变化、记忆表、决策因素分解。
+浏览器打开 `viewer/index.html`，拖入 `logs/*.jsonl`：时间轴回放、需求曲线、权重变化、记忆表（含目睹所学）、猫群动态（事件/惊吓/亲密变化）、亲近关系、决策因素分解（含安全感）。
 
 ## 工程结构
 
 - `core/` 模拟核心（纯 Rust 库，无界面）
 - `cli/` 命令行运行器与基准
-- `assets/` 数据驱动的内容（行为、树、事件）
+- `assets/` 数据驱动的内容（行为、树、事件、地点坐标）
 - `viewer/` 日志回放查看器（静态网页）

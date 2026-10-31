@@ -1,9 +1,11 @@
 //! 代理：一只猫（M0）。持有自己的权重表（结构共享、数值分离）、
 //! 需求、记忆表、独立随机数子流与当前动作。
 
+use crate::config::Params;
 use crate::memory::MemoryTable;
 use crate::needs::Needs;
 use crate::rng::{derive_seed, Rng, WorldSeed};
+use crate::space::Pos;
 use crate::time::Tick;
 use std::collections::BTreeMap;
 
@@ -31,6 +33,8 @@ pub struct Agent {
     pub memory: MemoryTable,
     /// 当前动作：(行为 ID, 开始拍, 结束拍)。
     pub current: Option<(String, Tick, Tick)>,
+    /// 位置（米）：当前行为地点；行为开始时移动过去，空闲时留在原地。
+    pub pos: Pos,
     /// 下次心跳拍（空闲时重新决策）。
     pub next_heartbeat: Tick,
     /// 行为执行次数（统计用）。
@@ -44,7 +48,7 @@ impl Agent {
         id: u32,
         name: String,
         behaviors: &[(String, f64)],
-        params: &crate::config::Params,
+        params: &Params,
     ) -> Self {
         let mut rng_ind = Rng::seeded(derive_seed(world_seed, id, STREAM_INDIVIDUAL));
         let temperature = rng_ind.uniform(params.temperature_min, params.temperature_max);
@@ -67,6 +71,7 @@ impl Agent {
             base_weights,
             memory: MemoryTable::new(params.memory_cap, params.memory_top_k),
             current: None,
+            pos: (params.room_width / 2.0, params.room_height / 2.0),
             next_heartbeat: rng_ind.uniform_int(1, params.heartbeat_max),
             exec_counts: BTreeMap::new(),
             rng_decision: Rng::seeded(derive_seed(world_seed, id, STREAM_DECISION)),

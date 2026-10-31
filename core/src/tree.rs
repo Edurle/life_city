@@ -42,13 +42,17 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert(
             "eat".into(),
-            serde_json::from_str(r#"{"id":"eat","base_weight":3,"duration_min":10,"duration_max":30,"spot":"bowl"}"#)
-                .unwrap(),
+            serde_json::from_str(
+                r#"{"id":"eat","base_weight":3,"duration_min":10,"duration_max":30,"spot":"bowl"}"#,
+            )
+            .unwrap(),
         );
         m.insert(
             "play".into(),
-            serde_json::from_str(r#"{"id":"play","base_weight":1,"duration_min":10,"duration_max":20}"#)
-                .unwrap(),
+            serde_json::from_str(
+                r#"{"id":"play","base_weight":1,"duration_min":10,"duration_max":20}"#,
+            )
+            .unwrap(),
         );
         m
     }

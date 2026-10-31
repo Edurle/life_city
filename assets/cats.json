@@ -17,28 +17,46 @@
     "heartbeat_max": 20,
     "memory_cap": 500,
     "memory_top_k": 8,
-    "weight_jitter": 0.1
+    "weight_jitter": 0.1,
+    "room_width": 6.0,
+    "room_height": 6.0,
+    "witness_radius": 10.0,
+    "comfort_radius": 2.0,
+    "comfort_max": 0.8,
+    "comfort_min_bond": 0.35,
+    "imitation_factor": 0.7,
+    "bond_social_gain": 0.08,
+    "bond_player_gain": 0.15,
+    "initial_bond_max": 0.3,
+    "imitation_min_bond": 0.25,
+    "startle_min_salience": 0.6
   },
   "spots": [
     {
       "id": "bowl",
       "tags": [
         "food"
-      ]
+      ],
+      "x": 1.0,
+      "y": 4.5
     },
     {
       "id": "bed",
       "tags": [
         "quiet",
         "soft"
-      ]
+      ],
+      "x": 4.5,
+      "y": 1.0
     },
     {
       "id": "windowsill",
       "tags": [
         "sun",
         "view"
-      ]
+      ],
+      "x": 0.3,
+      "y": 3.0
     },
     {
       "id": "cat_tree",
@@ -46,33 +64,43 @@
         "play",
         "high",
         "view"
-      ]
+      ],
+      "x": 5.5,
+      "y": 4.5
     },
     {
       "id": "box",
       "tags": [
         "hide",
         "quiet"
-      ]
+      ],
+      "x": 0.5,
+      "y": 0.5
     },
     {
       "id": "litter",
       "tags": [
         "toilet"
-      ]
+      ],
+      "x": 5.7,
+      "y": 0.4
     },
     {
       "id": "sofa",
       "tags": [
         "soft",
         "social"
-      ]
+      ],
+      "x": 3.0,
+      "y": 5.5
     },
     {
       "id": "scratching_post",
       "tags": [
         "scratch"
-      ]
+      ],
+      "x": 2.0,
+      "y": 5.2
     }
   ],
   "behaviors": [
@@ -347,7 +375,9 @@
       },
       "immune_behavior_tags": [
         "hide"
-      ]
+      ],
+      "name": "吸尘器",
+      "radius": 2.5
     },
     {
       "id": "treat_time",
@@ -363,7 +393,9 @@
         "food": 3.0,
         "social": 2.0
       },
-      "immune_behavior_tags": []
+      "immune_behavior_tags": [],
+      "name": "零食时间",
+      "radius": 2.0
     },
     {
       "id": "sun_burst",
@@ -378,7 +410,9 @@
         "sun": 2.5,
         "sleep": 1.3
       },
-      "immune_behavior_tags": []
+      "immune_behavior_tags": [],
+      "name": "阳光",
+      "radius": 0
     },
     {
       "id": "stranger_visit",
@@ -396,7 +430,9 @@
       },
       "immune_behavior_tags": [
         "hide"
-      ]
+      ],
+      "name": "陌生人来访",
+      "radius": 3.0
     }
   ]
 }

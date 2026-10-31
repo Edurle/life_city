@@ -5,7 +5,7 @@ use crate::needs::Needs;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const LOG_VERSION: u32 = 1;
+pub const LOG_VERSION: u32 = 2;
 
 /// 决策的因素分解：系统能"报告原因"的载体。
 #[derive(Debug, Clone, Serialize)]
@@ -18,6 +18,8 @@ pub struct FactorBreakdown {
     pub need_mult: f64,
     /// 情境记忆乘数。
     pub mem_mult: f64,
+    /// 安全感（M2）：0 = 身边没有可信任的同伴；越高，负面记忆被压制越多。
+    pub comfort: f64,
     /// 第一层生理反射强制执行。
     pub forced: bool,
     /// 玩家意志指令覆盖（M1 意志节点）。
@@ -36,6 +38,23 @@ pub enum LogEvent {
     EnvEvent {
         tick: u64,
         event: String,
+        /// 事件发生位置（米）；全房间事件记录房间中心。
+        pos: (f64, f64),
+    },
+    /// 惊吓反应（M2）：强负面事件打断了代理正在进行的行为——
+    /// 这是其他代理能"目睹"的公开反应，也是模仿节点的触发源。
+    Startled {
+        tick: u64,
+        agent: u32,
+        event: String,
+    },
+    /// 关系变化（M2）：共同度过社交时光后亲密值增长。
+    BondChange {
+        tick: u64,
+        a: u32,
+        b: u32,
+        delta: f64,
+        value: f64,
     },
     Decision {
         tick: u64,
@@ -61,6 +80,12 @@ pub enum LogEvent {
         event: String,
         salience: f64,
         mults: BTreeMap<String, f64>,
+        /// 间接记忆的来源代理（目睹了谁的遭遇）；直接经历为 None。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source: Option<u32>,
+        /// 是否间接记忆（模仿节点写入）。
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        vicarious: bool,
     },
     /// 周期性状态快照（每小时）：查看器只凭日志即可重建任意时刻状态。
     Snapshot {
@@ -97,6 +122,8 @@ pub struct AgentSummary {
     /// 记忆条数与最强烈的三条记忆（"报告原因"的摘要）。
     pub memory_count: usize,
     pub top_memories: Vec<String>,
+    /// 最亲近的关系（M2，名字 + 亲密值）。
+    pub top_bonds: Vec<(String, f64)>,
 }
 
 /// 日志收集器：开发与常规运行写入内存最后落盘；基准模式关闭以测纯模拟性能。

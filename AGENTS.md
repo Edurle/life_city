@@ -15,9 +15,9 @@ city_life_simulator — 概率行为树驱动的第一人称生活模拟游戏�
 - 表现：2.5D 街区视角，Godot 为首选客户端候选（M3 竖切验证 godot-rust）；时间速度档 暂停/×1/×2/×10/×100（正常 1 现实秒 = 1 模拟分钟）由表现层控制。
 - 项目代码目录只放代码。
 
-## 代码结构（M0 完成，M1 进行中）
-- `core/`（crate living-core）：`rng.rs` 确定性随机数、`time.rs` 时间、`needs.rs` 需求、`config.rs` 数据配置与校验、`tree.rs` 树可用性评估、`memory.rs` 记忆表、`agent.rs` 代理（含意志力与待执行指令）、`world.rs` 调度与决策核心（含指令成本模型与意志节点）、`log.rs` JSONL 日志、`save.rs` bincode 快照存档。
-- `cli/`（crate living-cli）：`living-cli` 批量运行（支持 `--save/--load`）与 `--bench` 基准；`living-play` 终端交互调试器（编号菜单指挥玩家的猫，实时事件反馈，退出自动存档可续玩）。
-- `assets/cats.json`：M0 猫的行为注册表/树/环境事件（含中文显示名，调参数值改这里，不改代码）。
-- `viewer/`：日志回放查看器（需求与意志力曲线、决策因素分解、玩家指令记录），静态网页零依赖。
-- 进度：M0、M1 完成（《M0/M1 开发记录》，测试 25 个全过）；下一步 M2 猫群（关系表、模仿节点、记忆泛化完整版）。
+## 代码结构（M2 完成）
+- `core/`（crate living-core）：`rng.rs` 确定性随机数、`time.rs` 时间、`needs.rs` 需求、`config.rs` 数据配置与校验、`tree.rs` 树可用性评估、`memory.rs` 记忆表（桶索引泛化检索 + 缓存 + valence + 间接记忆）、`space.rs` 空间哈希网格、`relation.rs` 关系表、`agent.rs` 代理（含意志力、位置）、`world.rs` 调度与决策核心（事件半径与目睹传播、惊吓、亲密增长、安全感）、`log.rs` JSONL 日志（v2）、`save.rs` bincode 快照存档（v2）。
+- `cli/`（crate living-cli）：`living-cli` 批量运行（支持 `--save/--load`）与 `--bench` 基准；`living-play` 终端交互调试器（编号菜单指挥玩家的猫，猫群动态播报，退出自动存档可续玩）。
+- `assets/cats.json`：猫的行为注册表/树/环境事件/地点坐标（中文显示名，调参数值改这里，不改代码）。
+- `viewer/`：日志回放查看器（需求与意志力曲线、决策因素分解含安全感、猫群动态、亲近关系），静态网页零依赖。
+- 进度：M0、M1、M2 完成（《M0/M1/M2 开发记录》，测试 42 个全过）；下一步 M3 一条街（人类角色、街道地图、昼夜、地点声誉，godot-rust 竖切验证）。
