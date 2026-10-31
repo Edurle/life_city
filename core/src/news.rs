@@ -60,6 +60,42 @@ pub fn news_text(
             }
             Some(format!("{when}【民生】{who}从{from}变成了{to}（{reason}）"))
         }
+        // M5 二阶段：恋爱与新生（小镇的喜事也是新闻）。
+        LogEvent::Couple {
+            tick,
+            a,
+            b,
+            started,
+        } => {
+            let when = format_clock(*tick);
+            if *started {
+                Some(format!(
+                    "{when}【喜讯】{}和{}在一起了，面包房送了两个喜字面包",
+                    name_of(*a),
+                    name_of(*b)
+                ))
+            } else {
+                Some(format!(
+                    "{when}【惋惜】{}和{}平静地分开了，朋友说他们还会打招呼",
+                    name_of(*a),
+                    name_of(*b)
+                ))
+            }
+        }
+        LogEvent::Born {
+            tick,
+            agent,
+            mother,
+            father,
+        } => {
+            let when = format_clock(*tick);
+            Some(format!(
+                "{when}【新生儿】{}和{}的家添了新成员{}，全小镇都替他们高兴",
+                name_of(*mother),
+                name_of(*father),
+                name_of(*agent)
+            ))
+        }
         _ => None,
     }
 }

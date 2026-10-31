@@ -5,6 +5,7 @@ use crate::config::{BehaviorDef, TreeNode};
 use crate::needs::Needs;
 use std::collections::BTreeMap;
 
+#[allow(clippy::too_many_arguments)] // 门参数随里程碑增长：需求/时间/职业/伴侣
 pub fn available_behaviors<'a>(
     node: &'a TreeNode,
     needs: &Needs,
@@ -12,38 +13,48 @@ pub fn available_behaviors<'a>(
     subtrees: &'a BTreeMap<String, TreeNode>,
     job: Option<&str>,
     hour: u32,
+    mate: bool,
     out: &mut Vec<&'a str>,
 ) {
     match node {
         TreeNode::Selector { children } => {
             for c in children {
-                available_behaviors(c, needs, behaviors, subtrees, job, hour, out);
+                available_behaviors(c, needs, behaviors, subtrees, job, hour, mate, out);
             }
         }
         TreeNode::Gate { need, below, child } => {
             // 门放行条件：需求当前值低于阈值。
             if let Some(v) = needs.get(need) {
                 if v < *below {
-                    available_behaviors(child, needs, behaviors, subtrees, job, hour, out);
+                    available_behaviors(child, needs, behaviors, subtrees, job, hour, mate, out);
                 }
             }
         }
         TreeNode::TimeGate { from, to, child } => {
             // 时间门放行条件：当前小时在窗口内（昼夜节律，如睡觉/逛公园）。
             if crate::time::in_hour_window(hour, *from, *to) {
-                available_behaviors(child, needs, behaviors, subtrees, job, hour, out);
+                available_behaviors(child, needs, behaviors, subtrees, job, hour, mate, out);
             }
         }
         TreeNode::Subtree { tree_ref } => {
             // 子树引用：原地展开（校验已保证存在且无环）。
             if let Some(sub) = subtrees.get(tree_ref) {
-                available_behaviors(sub, needs, behaviors, subtrees, job, hour, out);
+                available_behaviors(sub, needs, behaviors, subtrees, job, hour, mate, out);
             }
         }
-        TreeNode::JobGate { job: gate_job, child } => {
+        TreeNode::JobGate {
+            job: gate_job,
+            child,
+        } => {
             // 职业门（M5）：只有干这一行的代理放行工作分支。
             if job == Some(gate_job.as_str()) {
-                available_behaviors(child, needs, behaviors, subtrees, job, hour, out);
+                available_behaviors(child, needs, behaviors, subtrees, job, hour, mate, out);
+            }
+        }
+        TreeNode::MateGate { child } => {
+            // 伴侣门（M5 二阶段）：只有恋爱中的代理放行（约会分支）。
+            if mate {
+                available_behaviors(child, needs, behaviors, subtrees, job, hour, mate, out);
             }
         }
         TreeNode::Action { behavior } => {
@@ -94,13 +105,13 @@ mod tests {
         let mut needs = Needs::full(); // hunger = 100
         let mut out = vec![];
         let subs = no_subtrees();
-        available_behaviors(&tree, &needs, &b, &subs, None, 12, &mut out);
+        available_behaviors(&tree, &needs, &b, &subs, None, 12, false, &mut out);
         assert_eq!(out, vec!["play"]);
 
         needs.hunger = 50.0;
         let mut out = vec![];
         let subs = no_subtrees();
-        available_behaviors(&tree, &needs, &b, &subs, None, 12, &mut out);
+        available_behaviors(&tree, &needs, &b, &subs, None, 12, false, &mut out);
         assert_eq!(out, vec!["eat", "play"]);
     }
 
@@ -117,11 +128,31 @@ mod tests {
         let needs = Needs::full();
         let mut night = vec![];
         let subs = no_subtrees();
-        available_behaviors(&tree, &needs, &b, &subs, None, 23, &mut night);
+        available_behaviors(&tree, &needs, &b, &subs, None, 23, false, &mut night);
         assert_eq!(night, vec!["eat", "play"], "夜间放行夜间行为");
         let mut day = vec![];
-        available_behaviors(&tree, &needs, &b, &subs, None, 12, &mut day);
+        available_behaviors(&tree, &needs, &b, &subs, None, 12, false, &mut day);
         assert_eq!(day, vec!["play"], "白天不放行夜间行为");
+    }
+
+    /// 伴侣门（M5 二阶段）：有恋人才放行约会分支。
+    #[test]
+    fn mate_gate_gates_dating_branch() {
+        let b = cfg();
+        let tree: TreeNode = serde_json::from_str(
+            r#"{"type":"selector","children":[
+                {"type":"mate_gate","child":{"type":"action","behavior":"eat"}},
+                {"type":"action","behavior":"play"}]}"#,
+        )
+        .unwrap();
+        let needs = Needs::full();
+        let mut single = vec![];
+        let subs = no_subtrees();
+        available_behaviors(&tree, &needs, &b, &subs, None, 12, false, &mut single);
+        assert_eq!(single, vec!["play"], "单身不放行约会分支");
+        let mut coupled = vec![];
+        available_behaviors(&tree, &needs, &b, &subs, None, 12, true, &mut coupled);
+        assert_eq!(coupled, vec!["eat", "play"], "恋爱中放行约会分支");
     }
 
     /// 子树引用（M4.5）：按名展开，与内联写法结果一致。
@@ -152,8 +183,8 @@ mod tests {
         needs.hunger = 50.0;
         let mut a = vec![];
         let mut b2 = vec![];
-        available_behaviors(&via_ref, &needs, &b, &subs, None, 12, &mut a);
-        available_behaviors(&inline, &needs, &b, &subs, None, 12, &mut b2);
+        available_behaviors(&via_ref, &needs, &b, &subs, None, 12, false, &mut a);
+        available_behaviors(&inline, &needs, &b, &subs, None, 12, false, &mut b2);
         assert_eq!(a, b2, "子树引用应与内联等价");
         assert_eq!(a, vec!["eat", "play"]);
 
@@ -166,6 +197,7 @@ mod tests {
             &subs,
             None,
             12,
+            false,
             &mut full,
         );
         assert_eq!(full, vec!["play"]);

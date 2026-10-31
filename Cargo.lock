@@ -128,6 +128,7 @@ name = "living-cli"
 version = "0.1.0"
 dependencies = [
  "living-core",
+ "serde_json",
 ]
 
 [[package]]

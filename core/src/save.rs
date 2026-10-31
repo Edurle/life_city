@@ -23,10 +23,16 @@ pub struct SaveState {
     pub area_states: BTreeMap<String, crate::area::AreaState>,
     pub event_schedule: Vec<Tick>,
     pub world_rng: Rng,
+    /// 恋爱与生育骰子（M5 二阶段）。
+    pub life_rng: Rng,
+    /// 世界种子（M5 二阶段：新生儿按种子派生自己的子流）。
+    pub world_seed: u64,
+    /// 物种索引（M5 二阶段）。
+    pub species_index: Vec<String>,
     pub decisions_done: u64,
 }
 
-pub const SAVE_VERSION: u32 = 5;
+pub const SAVE_VERSION: u32 = 6;
 
 impl World {
     /// 导出二进制快照。
@@ -40,6 +46,9 @@ impl World {
             area_states: self.area_states.clone(),
             event_schedule: self.event_schedule.clone(),
             world_rng: self.world_rng.clone(),
+            life_rng: self.life_rng.clone(),
+            world_seed: self.world_seed,
+            species_index: self.species_index.clone(),
             decisions_done: self.decisions_done,
         };
         bincode::serialize(&state).expect("快照序列化不应失败")
@@ -76,6 +85,9 @@ impl World {
             spots,
             event_schedule: state.event_schedule,
             world_rng: state.world_rng,
+            life_rng: state.life_rng,
+            world_seed: state.world_seed,
+            species_index: state.species_index,
             logger: Logger::new(true),
             decisions_done: state.decisions_done,
             collect_recent: false,

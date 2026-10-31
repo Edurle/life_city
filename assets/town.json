@@ -51,7 +51,27 @@
     "goal_resist_cost": 6.0,
     "goal_break_cost": 15.0,
     "goal_decay_mult": 4.0,
-    "daily_upkeep": 20.0
+    "daily_upkeep": 15,
+    "social_reach_radius": 30.0,
+    "freshness_halflife_days": 2.0,
+    "couple_bond": 0.85,
+    "couple_break_bond": 0.45,
+    "couple_form_prob": 0.08,
+    "couple_gain_mult": 1.6,
+    "childhood_days": 60,
+    "old_age_days": 240,
+    "child_plasticity": 1.8,
+    "elder_plasticity": 0.45,
+    "elder_nostalgia": 0.5,
+    "birth_prob": 0.02,
+    "birth_min_couple_days": 20,
+    "parent_bond": 0.8,
+    "max_population": 40,
+    "novelty_gain": 0.05,
+    "novelty_mult": 0.7,
+    "imitation_habit": 0.15,
+    "observe_radius": 6.0,
+    "habit_weight_cap": 4
   },
   "areas": [
     {
@@ -207,6 +227,21 @@
       "area": "street"
     },
     {
+      "id": "tea_stand",
+      "tags": [
+        "street",
+        "food",
+        "trendy"
+      ],
+      "x": 21.5,
+      "y": 22,
+      "area": "street",
+      "menu": [
+        "tea_pearl",
+        "tea_taro"
+      ]
+    },
+    {
       "id": "shopfront",
       "tags": [
         "shop",
@@ -215,7 +250,11 @@
       ],
       "x": 31,
       "y": 11,
-      "area": "shop"
+      "area": "shop",
+      "menu": [
+        "snack_chips",
+        "snack_oden"
+      ]
     },
     {
       "id": "shelf",
@@ -236,7 +275,13 @@
       ],
       "x": 32,
       "y": 3.5,
-      "area": "diner"
+      "area": "diner",
+      "menu": [
+        "diner_set",
+        "diner_signature",
+        "diner_date_set",
+        "diner_date_candle"
+      ]
     },
     {
       "id": "stove_d",
@@ -310,7 +355,13 @@
       ],
       "x": 48,
       "y": 20,
-      "area": "home"
+      "area": "home",
+      "menu": [
+        "home_rice",
+        "home_feast",
+        "noodle_beef",
+        "noodle_seafood"
+      ]
     },
     {
       "id": "sofa_h",
@@ -321,7 +372,12 @@
       ],
       "x": 49,
       "y": 10,
-      "area": "home"
+      "area": "home",
+      "menu": [
+        "takeout_hotpot",
+        "takeout_pizza",
+        "takeout_salad"
+      ]
     },
     {
       "id": "bath",
@@ -421,6 +477,25 @@
   ],
   "behaviors": [
     {
+      "id": "eat_porridge",
+      "name": "在家喝粥",
+      "base_weight": 0.6,
+      "duration_min": 15,
+      "duration_max": 30,
+      "effects": {
+        "hunger": 30,
+        "fun": -3
+      },
+      "tags": [
+        "food",
+        "home",
+        "frugal"
+      ],
+      "spot": "table",
+      "gate_need": "hunger",
+      "gate_below": 50
+    },
+    {
       "id": "eat_home",
       "name": "在家吃饭",
       "base_weight": 3.0,
@@ -437,7 +512,26 @@
       "spot": "table",
       "gate_need": "hunger",
       "gate_below": 70,
-      "cost": 18
+      "cost": 18,
+      "variants": [
+        {
+          "id": "home_rice",
+          "name": "家常菜",
+          "cost": 18
+        },
+        {
+          "id": "home_feast",
+          "name": "大鱼大肉",
+          "cost": 32,
+          "effects": {
+            "fun": 6,
+            "hunger": 8
+          },
+          "tags": [
+            "硬菜"
+          ]
+        }
+      ]
     },
     {
       "id": "cook_fancy",
@@ -478,12 +572,30 @@
       "spot": "table",
       "gate_need": "hunger",
       "gate_below": 70,
-      "cost": 10
+      "cost": 10,
+      "variants": [
+        {
+          "id": "noodle_beef",
+          "name": "红烧牛肉面",
+          "cost": 10
+        },
+        {
+          "id": "noodle_seafood",
+          "name": "豪华海鲜面",
+          "cost": 16,
+          "effects": {
+            "fun": 3
+          },
+          "tags": [
+            "贵替"
+          ]
+        }
+      ]
     },
     {
       "id": "order_takeout",
       "name": "点外卖",
-      "base_weight": 1.7,
+      "base_weight": 1.1,
       "duration_min": 45,
       "duration_max": 90,
       "effects": {
@@ -499,13 +611,42 @@
       ],
       "spot": "sofa_h",
       "gate_need": "hunger",
-      "gate_below": 65,
-      "cost": 65
+      "gate_below": 55,
+      "cost": 65,
+      "variants": [
+        {
+          "id": "takeout_hotpot",
+          "name": "麻辣烫",
+          "cost": 32
+        },
+        {
+          "id": "takeout_pizza",
+          "name": "披萨",
+          "cost": 38,
+          "effects": {
+            "fun": 4
+          },
+          "tags": [
+            "芝士"
+          ]
+        },
+        {
+          "id": "takeout_salad",
+          "name": "轻食沙拉",
+          "cost": 28,
+          "effects": {
+            "energy": 3
+          },
+          "tags": [
+            "健康"
+          ]
+        }
+      ]
     },
     {
       "id": "diner_meal",
       "name": "下馆子",
-      "base_weight": 1.6,
+      "base_weight": 1.2,
       "duration_min": 25,
       "duration_max": 50,
       "effects": {
@@ -520,8 +661,26 @@
       ],
       "spot": "diner_table",
       "gate_need": "hunger",
-      "gate_below": 70,
-      "cost": 100
+      "gate_below": 60,
+      "cost": 100,
+      "variants": [
+        {
+          "id": "diner_set",
+          "name": "今日套餐",
+          "cost": 85
+        },
+        {
+          "id": "diner_signature",
+          "name": "招牌硬菜",
+          "cost": 110,
+          "effects": {
+            "fun": 6
+          },
+          "tags": [
+            "硬菜"
+          ]
+        }
+      ]
     },
     {
       "id": "late_snack",
@@ -556,7 +715,25 @@
         "outdoor"
       ],
       "spot": "shopfront",
-      "cost": 25
+      "cost": 25,
+      "variants": [
+        {
+          "id": "snack_chips",
+          "name": "薯片",
+          "cost": 12
+        },
+        {
+          "id": "snack_oden",
+          "name": "关东煮",
+          "cost": 18,
+          "effects": {
+            "hunger": 8
+          },
+          "tags": [
+            "热乎"
+          ]
+        }
+      ]
     },
     {
       "id": "sleep_home",
@@ -623,7 +800,8 @@
       ],
       "spot": "sidewalk",
       "gate_need": "social",
-      "gate_below": 60
+      "gate_below": 60,
+      "pick_target": true
     },
     {
       "id": "phone_call",
@@ -640,7 +818,109 @@
         "remote_social"
       ],
       "gate_need": "social",
-      "gate_below": 60
+      "gate_below": 60,
+      "pick_target": true
+    },
+    {
+      "id": "date_walk",
+      "name": "和对象逛逛",
+      "base_weight": 2.6,
+      "duration_min": 30,
+      "duration_max": 80,
+      "effects": {
+        "social": 35,
+        "fun": 18,
+        "energy": -5
+      },
+      "tags": [
+        "social",
+        "park",
+        "outdoor"
+      ],
+      "spot": "lawn",
+      "gate_need": "social",
+      "gate_below": 70,
+      "pick_target": true
+    },
+    {
+      "id": "date_diner",
+      "name": "和对象下馆子",
+      "base_weight": 1.2,
+      "duration_min": 40,
+      "duration_max": 80,
+      "effects": {
+        "hunger": 50,
+        "social": 30,
+        "fun": 20
+      },
+      "tags": [
+        "food",
+        "diner",
+        "social"
+      ],
+      "spot": "diner_table",
+      "gate_need": "social",
+      "gate_below": 55,
+      "cost": 100,
+      "pick_target": true,
+      "variants": [
+        {
+          "id": "diner_date_set",
+          "name": "双人套餐",
+          "cost": 95
+        },
+        {
+          "id": "diner_date_candle",
+          "name": "烛光晚餐",
+          "cost": 128,
+          "effects": {
+            "fun": 8,
+            "social": 8
+          },
+          "tags": [
+            "仪式感"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bubble_tea",
+      "name": "买杯奶茶",
+      "base_weight": 0.7,
+      "duration_min": 10,
+      "duration_max": 20,
+      "effects": {
+        "fun": 16,
+        "hunger": 6,
+        "social": 4
+      },
+      "tags": [
+        "food",
+        "trendy",
+        "street"
+      ],
+      "spot": "tea_stand",
+      "gate_need": "fun",
+      "gate_below": 78,
+      "cost": 22,
+      "variants": [
+        {
+          "id": "tea_pearl",
+          "name": "珍珠奶茶",
+          "cost": 22
+        },
+        {
+          "id": "tea_taro",
+          "name": "芋泥波波",
+          "cost": 26,
+          "effects": {
+            "fun": 3
+          },
+          "tags": [
+            "新品"
+          ]
+        }
+      ]
     },
     {
       "id": "walk_park",
@@ -724,12 +1004,12 @@
     {
       "id": "bake_work",
       "name": "面包房上工",
-      "base_weight": 5.0,
+      "base_weight": 6.0,
       "duration_min": 240,
       "duration_max": 420,
       "effects": {
         "energy": -8,
-        "fun": 4,
+        "fun": 5,
         "social": 6
       },
       "tags": [
@@ -742,12 +1022,13 @@
     {
       "id": "clerk_work",
       "name": "便利店收银",
-      "base_weight": 5.0,
+      "base_weight": 6.0,
       "duration_min": 240,
       "duration_max": 420,
       "effects": {
         "energy": -8,
-        "social": 6
+        "social": 6,
+        "fun": 5
       },
       "tags": [
         "work",
@@ -758,12 +1039,12 @@
     {
       "id": "office_work",
       "name": "写字间上班",
-      "base_weight": 5.0,
+      "base_weight": 6.0,
       "duration_min": 240,
       "duration_max": 420,
       "effects": {
         "energy": -10,
-        "fun": -3,
+        "fun": 5,
         "social": 8
       },
       "tags": [
@@ -775,13 +1056,13 @@
     {
       "id": "patrol_work",
       "name": "街面巡逻",
-      "base_weight": 5.0,
+      "base_weight": 6.0,
       "duration_min": 200,
       "duration_max": 360,
       "effects": {
         "energy": -10,
         "social": 6,
-        "fun": 2
+        "fun": 5
       },
       "tags": [
         "work",
@@ -794,12 +1075,12 @@
     {
       "id": "garden_work",
       "name": "公园养护",
-      "base_weight": 5.0,
+      "base_weight": 6.0,
       "duration_min": 200,
       "duration_max": 360,
       "effects": {
         "energy": -12,
-        "fun": 4
+        "fun": 5
       },
       "tags": [
         "work",
@@ -812,12 +1093,12 @@
     {
       "id": "cook_work",
       "name": "饭馆掌勺",
-      "base_weight": 5.0,
+      "base_weight": 6.0,
       "duration_min": 240,
       "duration_max": 420,
       "effects": {
         "energy": -10,
-        "fun": 4
+        "fun": 5
       },
       "tags": [
         "work",
@@ -829,12 +1110,12 @@
     {
       "id": "deliver_work",
       "name": "外卖配送",
-      "base_weight": 5.0,
+      "base_weight": 6.0,
       "duration_min": 220,
       "duration_max": 400,
       "effects": {
         "energy": -14,
-        "fun": 1
+        "fun": 5
       },
       "tags": [
         "work",
@@ -845,7 +1126,7 @@
     {
       "id": "steal",
       "name": "摸黑作案",
-      "base_weight": 0.45,
+      "base_weight": 0.6,
       "duration_min": 40,
       "duration_max": 80,
       "effects": {
@@ -856,7 +1137,7 @@
         "night"
       ],
       "honesty_bias": -1.2,
-      "pressure_bias": 2.0,
+      "pressure_bias": 3.0,
       "crime": {
         "max_take": 120.0,
         "caught_base": 0.5,
@@ -1077,7 +1358,7 @@
       "id": "baker",
       "name": "面包师",
       "work_behavior": "bake_work",
-      "salary": 120,
+      "salary": 150,
       "slots": 3,
       "switch_weight": 1.0,
       "honesty_bias": 0.2
@@ -1086,7 +1367,7 @@
       "id": "clerk",
       "name": "便利店店员",
       "work_behavior": "clerk_work",
-      "salary": 100,
+      "salary": 130,
       "slots": 4,
       "switch_weight": 1.0,
       "honesty_bias": 0.1
@@ -1095,7 +1376,7 @@
       "id": "office_worker",
       "name": "写字间职员",
       "work_behavior": "office_work",
-      "salary": 140,
+      "salary": 170,
       "slots": 4,
       "switch_weight": 1.0,
       "honesty_bias": 0.2
@@ -1104,7 +1385,7 @@
       "id": "police",
       "name": "警察",
       "work_behavior": "patrol_work",
-      "salary": 130,
+      "salary": 160,
       "slots": 3,
       "switch_weight": 0.8,
       "honesty_bias": 0.6
@@ -1113,7 +1394,7 @@
       "id": "gardener",
       "name": "园丁",
       "work_behavior": "garden_work",
-      "salary": 90,
+      "salary": 120,
       "slots": 2,
       "switch_weight": 0.9,
       "honesty_bias": 0.3
@@ -1122,7 +1403,7 @@
       "id": "cook",
       "name": "厨师",
       "work_behavior": "cook_work",
-      "salary": 125,
+      "salary": 155,
       "slots": 2,
       "switch_weight": 1.0,
       "honesty_bias": 0.2
@@ -1131,7 +1412,7 @@
       "id": "courier",
       "name": "外卖骑手",
       "work_behavior": "deliver_work",
-      "salary": 110,
+      "salary": 140,
       "slots": 3,
       "switch_weight": 1.1,
       "honesty_bias": 0.0
@@ -1152,6 +1433,15 @@
     "meals": {
       "type": "selector",
       "children": [
+        {
+          "type": "gate",
+          "need": "hunger",
+          "below": 50,
+          "child": {
+            "type": "action",
+            "behavior": "eat_porridge"
+          }
+        },
         {
           "type": "gate",
           "need": "hunger",
@@ -1273,6 +1563,32 @@
           "child": {
             "type": "action",
             "behavior": "phone_call"
+          }
+        },
+        {
+          "type": "mate_gate",
+          "child": {
+            "type": "selector",
+            "children": [
+              {
+                "type": "gate",
+                "need": "social",
+                "below": 70,
+                "child": {
+                  "type": "action",
+                  "behavior": "date_walk"
+                }
+              },
+              {
+                "type": "gate",
+                "need": "social",
+                "below": 75,
+                "child": {
+                  "type": "action",
+                  "behavior": "date_diner"
+                }
+              }
+            ]
           }
         }
       ]
@@ -1513,6 +1829,10 @@
               {
                 "type": "action",
                 "behavior": "stroll"
+              },
+              {
+                "type": "action",
+                "behavior": "bubble_tea"
               }
             ]
           }

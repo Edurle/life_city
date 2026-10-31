@@ -1,5 +1,6 @@
-//! living-core ——《活城》模拟核心（M5 一座镇·一阶段：职业与经济、犯罪与治安、
-//! 传闻与新闻；承接 M4 的 LOD 分层、习惯自动化、负面记忆恢复、密友查看、限期目标）。
+//! living-core ——《活城》模拟核心（M5 一座镇·二阶段：社交对象选择与恋爱、
+//! 老龄、流行传播、代际、吃什么变体层、日记与年度总结；承接一阶段的
+//! 职业与经济、犯罪与治安、传闻与新闻）。
 //!
 //! 架构铁律（见《技术选型与架构》）：
 //! - 本库不含任何界面代码，只读配置、只写日志；
@@ -9,11 +10,12 @@
 pub mod agent;
 pub mod area;
 pub mod config;
+pub mod diary;
 pub mod goal;
 pub mod log;
 pub mod memory;
-pub mod news;
 pub mod needs;
+pub mod news;
 pub mod relation;
 pub mod rng;
 pub mod save;

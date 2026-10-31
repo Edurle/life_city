@@ -89,6 +89,9 @@ fn main() {
                 world.run(240);
                 report(&world, &player, before, "⏩ 4 小时过去了");
             }
+            Some(5) => {
+                print_diary(&mut world, &player);
+            }
             Some(6) => {
                 print_habit_report(&world);
             }
@@ -151,11 +154,13 @@ fn draw_panel(world: &World, player: &str) {
     print!("\x1b[2J\x1b[H");
     let now = format_clock(world.tick);
     let action = match &a.current {
-        Some((bid, _, end)) => format!(
-            "{}（还剩 {} 分钟）",
-            behavior_name(world, bid),
-            end.saturating_sub(world.tick)
-        ),
+        Some((bid, _, end)) => {
+            let shown = match &a.current_variant {
+                Some(v) => behavior_name(world, &format!("{bid}#{v}")),
+                None => behavior_name(world, bid),
+            };
+            format!("{shown}（还剩 {} 分钟）", end.saturating_sub(world.tick))
+        }
         None => "闲着（在想做什么）".to_string(),
     };
     println!("──────────────────────────────────────────────");
@@ -169,7 +174,10 @@ fn draw_panel(world: &World, player: &str) {
             .unwrap_or_else(|| j.clone()),
         None => "无业".to_string(),
     };
-    println!("🕐 {now}   👤 {player}（你，{job_title}）  💰 {:.0} 元", a.wallet);
+    println!(
+        "🕐 {now}   👤 {player}（你，{job_title}）  💰 {:.0} 元",
+        a.wallet
+    );
     println!("正在: {action}");
     println!("⚡ 意志力 {} {:>3.0}/100", bar(a.willpower), a.willpower);
     let n = &a.needs;
@@ -243,7 +251,16 @@ fn draw_panel(world: &World, player: &str) {
             g.suppressed
         );
     }
-    // 密友（M4）
+    // 密友（M4）与恋人（M5 二阶段）。
+    if let Some(lid) = world.relations.couple_of(0) {
+        if let Some(l) = world.agents.iter().find(|x| x.id == lid) {
+            println!(
+                "💗 恋人：{}（亲密 {:.2}）",
+                l.name,
+                world.relations.bond(0, lid)
+            );
+        }
+    }
     let friends = world.close_friends(0);
     if !friends.is_empty() {
         let parts: Vec<String> = friends
@@ -264,24 +281,40 @@ fn draw_panel(world: &World, player: &str) {
             Some((bid, _, _)) => behavior_name(world, bid),
             None => "闲着".to_string(),
         };
-        println!(
-            "🧍 {}{}: {}",
-            other.name,
-            lod_name(other.lod),
-            act
-        );
+        println!("🧍 {}{}: {}", other.name, lod_name(other.lod), act);
     }
     println!("──────────────────────────────────────────────");
 }
 
 fn behavior_name(world: &World, id: &str) -> String {
-    world
-        .cfg
-        .behaviors
-        .iter()
-        .find(|b| b.id == id)
-        .map(|b| b.display_name().to_string())
-        .unwrap_or_else(|| id.to_string())
+    // M5 二阶段：键可带变体（"行为#变体"），拆开各自查名。
+    match id.split_once('#') {
+        Some((bid, vid)) => {
+            let b = world
+                .cfg
+                .behaviors
+                .iter()
+                .find(|x| x.id == bid)
+                .map(|x| x.display_name().to_string())
+                .unwrap_or_else(|| bid.to_string());
+            let v = world
+                .cfg
+                .behaviors
+                .iter()
+                .flat_map(|x| x.variants.iter())
+                .find(|x| x.id == vid)
+                .map(|x| x.display_name().to_string())
+                .unwrap_or_else(|| vid.to_string());
+            format!("{b}·{v}")
+        }
+        None => world
+            .cfg
+            .behaviors
+            .iter()
+            .find(|b| b.id == id)
+            .map(|b| b.display_name().to_string())
+            .unwrap_or_else(|| id.to_string()),
+    }
 }
 
 fn event_name(world: &World, id: &str) -> String {
@@ -297,7 +330,7 @@ fn event_name(world: &World, id: &str) -> String {
 
 fn print_menu(status: &[BehaviorStatus]) {
     println!(
-        "  0 ⏩30分钟  9 ⏩4小时  6 🔁习惯报告  7 💞密友  8 🎯目标  99 💾存日志退出"
+        "  0 ⏩30分钟  9 ⏩4小时  5 📖日记  6 🔁习惯报告  7 💞密友  8 🎯目标  99 💾存日志退出"
     );
     for (i, s) in status.iter().enumerate() {
         if s.available {
@@ -327,7 +360,11 @@ fn print_habit_report(world: &World) {
         println!(
             "  {}{}：×{:.2}（基准 {:.1}，执行 {} 次）",
             name,
-            if h.automated { "【已自动化】" } else { "" },
+            if h.automated {
+                "【已自动化】"
+            } else {
+                ""
+            },
             h.ratio,
             h.base,
             h.execs
@@ -335,6 +372,51 @@ fn print_habit_report(world: &World) {
         for m in &h.related_memories {
             println!("      因为：{m}");
         }
+    }
+    // 口味（M5 二阶段变体级习惯）："总点同一家外卖"。
+    let tastes: Vec<(&String, &f64)> = world.agents[0]
+        .variant_weights
+        .iter()
+        .filter(|(_, w)| **w > 1.25)
+        .collect();
+    if !tastes.is_empty() {
+        let mut v = tastes;
+        v.sort_by(|x, y| y.1.total_cmp(x.1));
+        let parts: Vec<String> = v
+            .iter()
+            .take(4)
+            .map(|(id, w)| format!("{} ×{:.2}", behavior_name(world, id), w))
+            .collect();
+        println!("  🍜 口味：{}", parts.join(" · "));
+    }
+    println!();
+}
+
+/// 日记（M5 二阶段，设计稿 6.4）：从日志自动生成的今天。
+fn print_diary(world: &mut World, player: &str) {
+    let day = world.tick.saturating_sub(1) / 1440;
+    let events = living_core::diary::events_of_day(world.logger.buf.lines(), day);
+    println!("\n📖 {player} 的日记（第 {} 天）", day + 1);
+    if events.is_empty() {
+        println!("  （今天还没发生什么值得写的）");
+        return;
+    }
+    let name_of = |id: u32| -> String {
+        world
+            .agents
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| format!("#{id}"))
+    };
+    let label = |bid: &str, vid: Option<&str>| -> String {
+        match vid {
+            Some(v) => behavior_name(world, &format!("{bid}#{v}")),
+            None => behavior_name(world, bid),
+        }
+    };
+    for l in living_core::diary::day_diary(&events, 0, name_of, &label) {
+        println!("  {l}");
     }
     println!();
 }
@@ -358,19 +440,32 @@ fn goal_menu(world: &mut World, lines: &mut io::Lines<io::StdinLock>) {
         println!("\n🎯 没有进行中的目标。想对抗哪个习惯？（输入菜单行为的数字，0 返回）");
     }
     let report = world.habit_report(0);
-    let candidates: Vec<String> = report
+    let mut candidates: Vec<String> = report
         .iter()
         .filter(|r| r.ratio > 1.15)
-        .take(6)
+        .take(4)
         .map(|r| r.behavior.clone())
         .collect();
+    // 口味级目标（M5 二阶段："这个月不点麻辣烫"）。
+    for (vid, w) in world.agents[0].variant_weights.iter() {
+        if *w > 1.35 && candidates.len() < 7 {
+            if let Some(owner) = world
+                .cfg
+                .behaviors
+                .iter()
+                .find(|b| b.variants.iter().any(|v| v.id == *vid))
+            {
+                candidates.push(format!("{}#{vid}", owner.id));
+            }
+        }
+    }
     if !candidates.is_empty() {
         let parts: Vec<String> = candidates
             .iter()
             .enumerate()
             .map(|(i, b)| format!("{}={}", i + 1, behavior_name(world, b)))
             .collect();
-        println!("  候选（较强的习惯）：{}", parts.join(" "));
+        println!("  候选（较强的习惯/口味）：{}", parts.join(" "));
     } else {
         println!("  （目前没有明显的习惯——先反复做点什么吧）");
     }
@@ -448,10 +543,7 @@ fn friend_menu(world: &mut World, lines: &mut io::Lines<io::StdinLock>) {
                     .as_ref()
                     .map(|b| behavior_name(world, b))
                     .unwrap_or_else(|| "闲着".into());
-                println!(
-                    "\n👀 {}（亲密 {:.2}）正在【{}】",
-                    v.name, v.bond, cur
-                );
+                println!("\n👀 {}（亲密 {:.2}）正在【{}】", v.name, v.bond, cur);
                 let nn = &v.needs;
                 println!(
                     "   需求：饥饿 {:.0} 精力 {:.0} 娱乐 {:.0} 社交 {:.0} 卫生 {:.0}",
@@ -544,7 +636,11 @@ fn report(world: &World, player: &str, before: usize, banner: &str) {
                 } else {
                     "它自己"
                 };
-                let auto = if factors.habit_auto { "（习惯）" } else { "" };
+                let auto = if factors.habit_auto {
+                    "（习惯）"
+                } else {
+                    ""
+                };
                 let comfort = if factors.comfort > 0.05 {
                     format!("×安全感{:.1}", factors.comfort)
                 } else {
@@ -693,7 +789,11 @@ fn report(world: &World, player: &str, before: usize, banner: &str) {
                 commanded,
                 ..
             } => {
-                let why = if *commanded { "你主动违约" } else { "它没忍住" };
+                let why = if *commanded {
+                    "你主动违约"
+                } else {
+                    "它没忍住"
+                };
                 println!(
                     "   {} 🎯 【{}】失守了（{why}）",
                     format_clock(*tick),
@@ -721,6 +821,82 @@ fn report(world: &World, player: &str, before: usize, banner: &str) {
                     "   {} 🎯 【{}】目标结束：{verdict}（忍住 {resists} 次）",
                     format_clock(*tick),
                     behavior_name(world, behavior)
+                );
+            }
+            // M5 二阶段：社交对象选择、恋爱、新生儿、模仿种草。
+            LogEvent::SocialPick {
+                tick,
+                agent,
+                target,
+                bond,
+                freshness,
+                impression,
+                ..
+            } => {
+                let who = name_of(*agent);
+                let tgt = name_of(*target);
+                let why = if *impression < 0.6 {
+                    "（其实心里有点膈应）".to_string()
+                } else if *freshness < 0.5 {
+                    "（刚见过面，又想聊）".to_string()
+                } else {
+                    format!("（亲密{bond:.2}）")
+                };
+                println!("   {} 🚶 {who}特意去找{tgt}{why}", format_clock(*tick));
+            }
+            LogEvent::Couple {
+                tick,
+                a,
+                b,
+                started,
+            } => {
+                if *started {
+                    println!(
+                        "   {} 💗 {}和{}在一起了！",
+                        format_clock(*tick),
+                        name_of(*a),
+                        name_of(*b)
+                    );
+                } else {
+                    println!(
+                        "   {} 💔 {}和{}分开了",
+                        format_clock(*tick),
+                        name_of(*a),
+                        name_of(*b)
+                    );
+                }
+            }
+            LogEvent::Born {
+                tick,
+                agent,
+                mother,
+                father,
+            } => {
+                println!(
+                    "   {} 👶 {}和{}的家添了新成员{}",
+                    format_clock(*tick),
+                    name_of(*mother),
+                    name_of(*father),
+                    name_of(*agent)
+                );
+            }
+            LogEvent::Imitate {
+                tick,
+                observer,
+                from,
+                behavior,
+                variant,
+                ..
+            } if *observer == 0 => {
+                let key = match variant {
+                    Some(v) => format!("{behavior}#{v}"),
+                    None => behavior.clone(),
+                };
+                println!(
+                    "   {} 👀 {player}看{}做了【{}】，有点想试",
+                    format_clock(*tick),
+                    name_of(*from),
+                    behavior_name(world, &key)
                 );
             }
             _ => {}

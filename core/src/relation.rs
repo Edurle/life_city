@@ -1,7 +1,10 @@
 //! 关系表（M2）：代理之间的亲密程度，稀疏存储。
 //! 技术文档 4.5：不建 N×N 矩阵——按代理各自的认识对象存邻接表。
 //! 双向对称（M2 的猫群互相熟悉；M5 人类角色再考虑单向好感）。
+//! M5 二阶段：恋人关系（couple 表）——状态机只有两态（恋人/不是），
+//! 转移由亲密值与概率驱动，无剧本。
 
+use crate::time::Tick;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -16,6 +19,9 @@ pub struct Relations {
     comfort_sources: BTreeMap<u32, BTreeMap<u32, f64>>,
     /// 安全感生效的亲密值门槛。
     comfort_min_bond: f64,
+    /// 恋人表：低编号一方 → (对方, 在一起的拍)。一名代理同时只有一个恋人
+    ///（M5 的轻松小镇：分了再谈，不搞多角）。
+    couples: BTreeMap<u32, (u32, Tick)>,
 }
 
 impl Default for Relations {
@@ -31,6 +37,7 @@ impl Relations {
             max_bond: BTreeMap::new(),
             comfort_sources: BTreeMap::new(),
             comfort_min_bond,
+            couples: BTreeMap::new(),
         }
     }
 
@@ -117,6 +124,47 @@ impl Relations {
         v
     }
 
+    // ---------- M5 二阶段：恋人关系 ----------
+    /// 某代理的恋人（无 = 单身）。
+    pub fn couple_of(&self, a: u32) -> Option<u32> {
+        if let Some(&(b, _)) = self.couples.get(&a) {
+            return Some(b);
+        }
+        self.couples
+            .iter()
+            .find(|(_, (b, _))| *b == a)
+            .map(|(x, _)| *x)
+    }
+
+    /// 两人是否为恋人。
+    pub fn are_couple(&self, a: u32, b: u32) -> bool {
+        self.couple_of(a) == Some(b)
+    }
+
+    /// 成为恋人（调用方保证双方单身；键存低编号一方）。返回在一起的拍。
+    pub fn set_couple(&mut self, a: u32, b: u32, tick: Tick) {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        self.couples.insert(lo, (hi, tick));
+    }
+
+    /// 分手。
+    pub fn break_couple(&mut self, a: u32, b: u32) {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        if let Some(&(x, _)) = self.couples.get(&lo) {
+            if x == hi {
+                self.couples.remove(&lo);
+            }
+        }
+    }
+
+    /// 全部恋人对（低编号方, 高编号方, 在一起的拍），键序确定。
+    pub fn couple_pairs(&self) -> Vec<(u32, u32, Tick)> {
+        self.couples
+            .iter()
+            .map(|(lo, (hi, t))| (*lo, *hi, *t))
+            .collect()
+    }
+
     /// 增量维护每代理最大亲密值（comfort 判定的 O(1) 短路）：
     /// 新值更高 → 直接抬高；被调低且旧值恰为最大值 → 全量重算（罕见路径）。
     fn update_max(&mut self, x: u32, old: Option<f64>, v: f64) {
@@ -187,5 +235,22 @@ mod tests {
         r.set_bond(1, 2, 0.2);
         assert_eq!(r.comfort_sources(1).count(), 0);
         assert_eq!(r.comfort_sources(2).count(), 0);
+    }
+
+    /// 恋人表（M5 二阶段）：登记、查询、分手，双方互查。
+    #[test]
+    fn couple_bookkeeping() {
+        let mut r = Relations::default();
+        assert_eq!(r.couple_of(1), None);
+        r.set_couple(5, 2, 100);
+        assert_eq!(r.couple_of(2), Some(5));
+        assert_eq!(r.couple_of(5), Some(2));
+        assert!(r.are_couple(5, 2));
+        assert_eq!(r.couple_pairs(), vec![(2, 5, 100)]);
+        r.break_couple(2, 5);
+        assert_eq!(r.couple_of(5), None, "分手后双方都查不到");
+        // 分手后再和别人谈，旧键不残留。
+        r.set_couple(2, 9, 200);
+        assert_eq!(r.couple_of(9), Some(2));
     }
 }

@@ -5,7 +5,7 @@ use crate::needs::Needs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const LOG_VERSION: u32 = 5;
+pub const LOG_VERSION: u32 = 6;
 
 /// 决策的因素分解：系统能"报告原因"的载体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +73,9 @@ pub enum LogEvent {
         agent: u32,
         behavior: String,
         until: u64,
+        /// 选中的变体（M5 二阶段吃什么）：无变体的行为为 None。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<String>,
     },
     ActionEnd {
         tick: u64,
@@ -202,6 +205,44 @@ pub enum LogEvent {
         /// 放弃时还回的权重（反弹幅度）；到期成功时为 0（压制已转化为自然衰减）。
         rebound: f64,
     },
+    // ---------- M5 二阶段 ----------
+    /// 社交对象选择（"和谁"）：带因素的完整记录——
+    /// 能解释"它找了林雨桐（亲密 0.8）而不是王建国（上次吵架）"。
+    SocialPick {
+        tick: u64,
+        agent: u32,
+        target: u32,
+        /// 四项权重因素的当时值（查看器分解用）。
+        bond: f64,
+        freshness: f64,
+        reach: f64,
+        impression: f64,
+    },
+    /// 恋爱状态机转移：在一起 / 分手。
+    Couple {
+        tick: u64,
+        a: u32,
+        b: u32,
+        started: bool,
+    },
+    /// 新生儿出生（代际）：父母双方与新成员。
+    Born {
+        tick: u64,
+        agent: u32,
+        mother: u32,
+        father: u32,
+    },
+    /// 行为模仿（M5 二阶段流行传播）：目睹亲近同伴完成某行为，
+    /// 自己对该行为的权重上升了一点（习惯的传染）。
+    Imitate {
+        tick: u64,
+        observer: u32,
+        from: u32,
+        behavior: String,
+        /// 变体（吃什么被种草）；行为级模仿为 None。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<String>,
+    },
     Summary {
         agents: Vec<AgentSummary>,
         areas: Vec<AreaSummary>,
@@ -231,6 +272,12 @@ pub struct AgentSummary {
     pub top_memories: Vec<String>,
     /// 最亲近的关系（M2，名字 + 亲密值）。
     pub top_bonds: Vec<(String, f64)>,
+    /// 年龄（模拟日，M5 二阶段）。
+    #[serde(default)]
+    pub age_days: f64,
+    /// 恋人名字（M5 二阶段；无 = None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lover: Option<String>,
 }
 
 /// 日志收集器：开发与常规运行写入内存最后落盘；基准模式关闭以测纯模拟性能。

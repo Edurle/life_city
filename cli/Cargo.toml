@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 living-core = { path = "../core" }
+serde_json = "1.0.154"
 
 [[bin]]
 name = "living-cli"

@@ -232,23 +232,51 @@ impl MemoryTable {
 
     /// 每日例行衰减：习惯化程度回落（事件恢复新颖度），
     /// 记忆强度轻微消退（×0.95/天；强烈记忆靠重演维持）。
-    pub fn daily_decay(&mut self) {
+    /// nostalgia（0..1，M5 二阶段老龄怀旧）：正面记忆消退更慢、负面更快——
+    /// "与正面记忆相关的权重相对上升"，旧日子越回想越甜。
+    pub fn daily_decay(&mut self, nostalgia: f64) {
+        let nostalgia = nostalgia.clamp(0.0, 1.0);
         for v in self.habituation.values_mut() {
             *v = (*v - 0.05).max(0.0);
         }
         for e in &mut self.entries {
-            e.strength *= 0.95;
+            let rate = if e.valence < 0.0 {
+                0.95 - 0.15 * nostalgia
+            } else {
+                (0.95 + 0.04 * nostalgia).min(0.995)
+            };
+            e.strength *= rate;
         }
         self.entries.retain(|e| e.strength > 0.02);
         self.rebuild_index();
         self.cache.clear();
     }
 
+    /// 人物印象（M5 二阶段，社交对象选择的权重项）：把"关于某人"的记忆
+    /// 聚合成对某人的好感乘数。负面记忆（被某人偷过、被某人吓过）→ <1 回避；
+    /// 正面记忆（某人请客）→ >1 亲近。无印象的人为 1。
+    /// 乘积后整体钳制，防止单一事件把社交判成死刑。
+    pub fn person_impressions(&self) -> BTreeMap<u32, f64> {
+        let mut out: BTreeMap<u32, f64> = BTreeMap::new();
+        for e in &self.entries {
+            if let Some(p) = e.person {
+                let factor = (1.0 + e.valence * e.strength * 2.5).clamp(0.05, 1.6);
+                *out.entry(p).or_insert(1.0) *= factor;
+            }
+        }
+        for v in out.values_mut() {
+            *v = v.clamp(0.05, 3.0);
+        }
+        out
+    }
+
     /// 给已有条目标注"关于某人"（案发后受害者记住小偷等）。
     pub fn set_person(&mut self, base_event_name: &str, quarter: u8, person: u32) {
-        if let Some(e) = self.entries.iter_mut().find(|e| {
-            base_event(&e.event) == base_event_name && e.quarter == quarter
-        }) {
+        if let Some(e) = self
+            .entries
+            .iter_mut()
+            .find(|e| base_event(&e.event) == base_event_name && e.quarter == quarter)
+        {
             e.person = Some(person);
         }
     }
@@ -542,6 +570,103 @@ mod tests {
         );
     }
 
+    /// 人物印象（M5 二阶段）：关于某人的负面记忆 → 回避乘数 < 1；
+    /// 正面记忆 → > 1；无印象 → 1。被偷过的人不会再主动找小偷聊天。
+    #[test]
+    fn person_impressions_avoid_wrongdoer() {
+        let mut mem = MemoryTable::new(100, 8);
+        // 关于 7 号的强烈负面记忆（被偷）与关于 3 号的正面记忆（请客）。
+        mem.write(
+            "被偷",
+            &tags(&["crime"]),
+            3,
+            0.9,
+            1.0,
+            -0.8,
+            false,
+            mults(&[("crime", 0.3)]),
+            10,
+        );
+        mem.set_person("被偷", 3, 7);
+        mem.write(
+            "请客",
+            &tags(&["food"]),
+            2,
+            0.7,
+            1.0,
+            0.8,
+            false,
+            mults(&[("food", 1.4)]),
+            20,
+        );
+        mem.set_person("请客", 2, 3);
+        let imp = mem.person_impressions();
+        let thief = imp.get(&7).copied().unwrap_or(1.0);
+        let friend = imp.get(&3).copied().unwrap_or(1.0);
+        assert!(thief < 0.7, "对有过节的人应回避：{thief}");
+        assert!(friend > 1.1, "对恩人应亲近：{friend}");
+        assert_eq!(imp.get(&9), None, "无印象的人不进表");
+    }
+
+    /// 怀旧消退（M5 二阶段老龄）：同等强度的正负记忆，
+    /// 高怀旧下负面消退更快、正面更耐久。
+    #[test]
+    fn nostalgia_favors_positive_memories() {
+        let mut plain = MemoryTable::new(100, 8);
+        let mut nostalgic = MemoryTable::new(100, 8);
+        for mem in [&mut plain, &mut nostalgic] {
+            mem.write(
+                "bad",
+                &tags(&["a"]),
+                1,
+                0.9,
+                1.0,
+                -0.8,
+                false,
+                BTreeMap::new(),
+                1,
+            );
+            mem.write(
+                "good",
+                &tags(&["b"]),
+                1,
+                0.9,
+                1.0,
+                0.8,
+                false,
+                BTreeMap::new(),
+                1,
+            );
+        }
+        for _ in 0..10 {
+            plain.daily_decay(0.0);
+            nostalgic.daily_decay(0.5);
+        }
+        let strength = |m: &MemoryTable, ev: &str| {
+            m.entries
+                .iter()
+                .find(|e| e.event == ev)
+                .map(|e| e.strength)
+                .unwrap()
+        };
+        let n_bad = strength(&nostalgic, "bad");
+        let p_bad = strength(&plain, "bad");
+        let n_good = strength(&nostalgic, "good");
+        let p_good = strength(&plain, "good");
+        assert!(
+            n_bad < p_bad * 0.85,
+            "怀旧者负面记忆消退更快：{n_bad} vs {p_bad}"
+        );
+        assert!(
+            n_good > p_good,
+            "怀旧者正面记忆更耐久：{n_good} vs {p_good}"
+        );
+        assert!(
+            n_good / n_bad > p_good / p_bad,
+            "怀旧使正负记忆的相对权重偏向正面"
+        );
+    }
+
     /// 暴露恢复（M4）：完成被恐惧抑制的行为 → 相关负面记忆消退；
     /// 鼓励（同伴在身边）加速；被促进的行为与无关记忆不受影响。
     #[test]
@@ -571,16 +696,19 @@ mod tests {
         );
         let s_before: Vec<f64> = mem.entries.iter().map(|e| e.strength).collect();
         // 逛公园（tags 含 park）→ 恐惧记忆消退，正面记忆不动。
-        let faded = mem.expose(
-            &tags(&["park", "outdoor"]),
-            0.88,
-            false,
-        );
+        let faded = mem.expose(&tags(&["park", "outdoor"]), 0.88, false);
         assert!(faded > 0.01, "应消退部分恐惧：{faded}");
         let strength_of = |m: &MemoryTable, ev: &str| {
-            m.entries.iter().find(|e| e.event == ev).map(|e| e.strength).unwrap()
+            m.entries
+                .iter()
+                .find(|e| e.event == ev)
+                .map(|e| e.strength)
+                .unwrap()
         };
-        assert!(strength_of(&mem, "rowdy") < s_before[0] * 0.9, "恐惧应明显消退");
+        assert!(
+            strength_of(&mem, "rowdy") < s_before[0] * 0.9,
+            "恐惧应明显消退"
+        );
         assert!(
             (strength_of(&mem, "concert") - s_before[1]).abs() < 1e-9,
             "正面记忆不受影响"

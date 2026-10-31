@@ -112,11 +112,74 @@ fn main() {
             println!("  {n}");
         }
     }
-    if world.stats.thefts > 0 || world.stats.job_changes > 0 {
+    let st = &world.stats;
+    if st.thefts > 0 || st.job_changes > 0 || st.couples_formed > 0 || st.births > 0 {
         println!(
-            "\n=== 统计 === 盗窃 {} 起（被抓 {}）· 职业变动 {} 次",
-            world.stats.thefts, world.stats.thefts_caught, world.stats.job_changes
+            "\n=== 统计 === 盗窃 {} 起（被抓 {}）· 职业变动 {} 次 · 成对 {} 对 · 新生儿 {} 名",
+            st.thefts, st.thefts_caught, st.job_changes, st.couples_formed, st.births
         );
+    }
+
+    // M5 二阶段：玩家的日记与年度总结（设计稿 6.4，从日志自动生成）。
+    if world.logger.enabled && !world.agents.is_empty() {
+        let name_of = |id: u32| -> String {
+            world
+                .agents
+                .iter()
+                .find(|a| a.id == id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| format!("#{id}"))
+        };
+        let label = |bid: &str, vid: Option<&str>| -> String {
+            let b = world
+                .cfg
+                .behaviors
+                .iter()
+                .find(|x| x.id == bid)
+                .map(|x| x.display_name().to_string())
+                .unwrap_or_else(|| bid.to_string());
+            match vid {
+                Some(v) => {
+                    let vn = world
+                        .cfg
+                        .behaviors
+                        .iter()
+                        .flat_map(|x| x.variants.iter())
+                        .find(|x| x.id == v)
+                        .map(|x| x.display_name().to_string())
+                        .unwrap_or_else(|| v.to_string());
+                    format!("{b}·{vn}")
+                }
+                None => b,
+            }
+        };
+        // 取"有过活动的最后一天"：整段跑完时 tick 恰在下一天边界上。
+        let last_day = world.tick.saturating_sub(1) / 1440;
+        let day_events = living_core::diary::events_of_day(world.logger.buf.lines(), last_day);
+        let diary = living_core::diary::day_diary(&day_events, 0, name_of, &label);
+        if !diary.is_empty() {
+            println!(
+                "\n=== {} 的日记（第 {} 天） ===",
+                world.agents[0].name,
+                last_day + 1
+            );
+            for l in &diary {
+                println!("  {l}");
+            }
+        }
+        if days >= 90 {
+            let all: Vec<living_core::LogEvent> = world
+                .logger
+                .buf
+                .lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect();
+            let annual = living_core::diary::annual_summary(&all, 0, name_of, &label);
+            println!("\n=== {} 的年度总结 ===", world.agents[0].name);
+            for l in &annual {
+                println!("  {l}");
+            }
+        }
     }
 
     if !save_path.is_empty() {
@@ -191,13 +254,10 @@ fn bench() {
     w.run(30 * 1440);
     let d3 = t0.elapsed();
     let year3 = d3.as_secs_f64() * 365.0 / 30.0;
-    let tier_counts = w
-        .agents
-        .iter()
-        .fold([0usize; 3], |mut c, a| {
-            c[a.lod as usize] += 1;
-            c
-        });
+    let tier_counts = w.agents.iter().fold([0usize; 3], |mut c, a| {
+        c[a.lod as usize] += 1;
+        c
+    });
     println!(
         "  30 天耗时 {:.2}s（{} 次决策，T0={} T1={} T2={}）→ 外推一年 ≈ {:.1} 分钟",
         d3.as_secs_f64(),

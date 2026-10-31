@@ -22,11 +22,23 @@
 //! - 限期目标（设计稿 4.5）：戒断目标压制习惯权重，行为树仍选中时靠意志力
 //!   忍住，放弃则权重反弹。
 //!
+//! M5 二阶段（恋爱、老龄、流行、代际）：
+//! - 社交对象选择（"和谁"）：w = 亲密 × 新鲜度 × 可及性 × 人物记忆；
+//!   面对面社交寻人移动到对象身边——社交从空间巧合变成主动选择；
+//! - 恋爱状态机：亲密达标的互动概率成为恋人（伴侣门放行约会分支），
+//!   亲密跌破分手线则分手——全部概率驱动，无剧本；
+//! - 老龄：可塑性下降（新记忆写入变慢）+ 怀旧（正面记忆相对上升）；
+//! - 代际：恋人生育 → 新生儿继承父母习惯权重、童年高可塑；
+//! - 流行传播：新奇需求（重复积累、尝新满足）× 行为模仿（目睹亲近
+//!   同伴做某事，自己也想做）——活动起落无脚本，统计回归观察；
+//! - 吃什么变体层：行为带变体（价格/口味），菜单挂地点，
+//!   softmax 与习惯在变体级再走一次。
+//!
 //! 代理按编号顺序结算，随机数用独立子流，回放不依赖调度细节。
 
 use crate::agent::Agent;
 use crate::area::AreaState;
-use crate::config::{BehaviorDef, Params, SimConfig, SpotDef};
+use crate::config::{BehaviorDef, Params, SimConfig, SpotDef, VariantDef};
 use crate::goal::Goal;
 use crate::log::{AgentSummary, AreaSummary, FactorBreakdown, LogEvent, Logger, LOG_VERSION};
 use crate::needs::{urgency, Needs, NEED_KEYS};
@@ -39,6 +51,8 @@ use std::collections::BTreeMap;
 
 const STREAM_WORLD: u8 = 200;
 const STREAM_RELATION: u8 = 201;
+/// 恋爱与生育的骰子流（M5 二阶段）：与事件排程、决策流互不干扰。
+const STREAM_LIFE: u8 = 203;
 
 /// 初始熟悉度只在小群体（一间房）里生成；大世界（M3+ 街道）从陌生开始，
 /// 关系由真实互动建立——也避免大规模世界的 O(N²) 初始化。
@@ -64,6 +78,9 @@ pub struct TownStats {
     pub thefts: u64,
     pub thefts_caught: u64,
     pub job_changes: u64,
+    /// M5 二阶段：成对次数与新生儿数。
+    pub couples_formed: u64,
+    pub births: u64,
 }
 
 /// 玩家指令的结算结果。
@@ -144,6 +161,13 @@ pub struct World {
     /// 环境事件的下一次发生拍（与 cfg.env_events 下标对应）。
     pub(crate) event_schedule: Vec<Tick>,
     pub(crate) world_rng: Rng,
+    /// 恋爱与生育骰子（M5 二阶段）：独立子流，确定性。
+    pub(crate) life_rng: Rng,
+    /// 世界种子（M5 二阶段）：新生儿代理要按（种子, 编号, 用途）派生自己的子流。
+    pub(crate) world_seed: WorldSeed,
+    /// 物种索引（按代理编号）：出生不改变物种，决策循环里查目标物种用
+    ///（不必借用 agents 本身——那里正被逐个可变借用）。
+    pub(crate) species_index: Vec<String>,
     pub logger: Logger,
     /// 性能统计（基准模式用）。
     pub decisions_done: u64,
@@ -224,12 +248,22 @@ impl World {
         for a in &agents {
             grid.move_to(a.id, a.pos);
         }
+        // 变体权重表初始化（M5 二阶段吃什么）：全部从 1.0 起步——
+        // 口味偏好由习惯与模仿长出来，不掷随机数（不扰动既有属性流）。
+        for a in &mut agents {
+            for b in cfg.behaviors.iter().filter(|b| !b.variants.is_empty()) {
+                for v in &b.variants {
+                    a.variant_weights.entry(v.id.clone()).or_insert(1.0);
+                }
+            }
+        }
         let mut world_rng = Rng::seeded(derive_seed(seed, 0, STREAM_WORLD));
         let event_schedule = cfg
             .env_events
             .iter()
             .map(|e| world_rng.uniform_int(e.interval_min, e.interval_max))
             .collect();
+        let species_index: Vec<String> = agents.iter().map(|a| a.species.clone()).collect();
         World {
             tick: 0,
             cfg,
@@ -241,6 +275,9 @@ impl World {
             spots,
             event_schedule,
             world_rng,
+            life_rng: Rng::seeded(derive_seed(seed, 0, STREAM_LIFE)),
+            world_seed: seed,
+            species_index,
             logger: Logger::new(logging),
             decisions_done: 0,
             collect_recent: false,
@@ -264,12 +301,7 @@ impl World {
     /// - T1：lod_t1_radius 内、朋友（亲密 ≥ lod_friend_bond）
     /// - T2：其余背景代理（不逐拍决策，按天批量结算）
     pub fn refresh_lod(&mut self) {
-        let Some(ppos) = self
-            .agents
-            .iter()
-            .find(|a| a.is_player)
-            .map(|a| a.pos)
-        else {
+        let Some(ppos) = self.agents.iter().find(|a| a.is_player).map(|a| a.pos) else {
             for a in &mut self.agents {
                 a.lod = 0;
             }
@@ -486,6 +518,7 @@ impl World {
     pub fn debug_options(&mut self, id: u32) -> Vec<ChoiceInfo> {
         let tick = self.tick;
         let comfort = self.agent_comfort(id);
+        let mate = self.relations.couple_of(id).is_some();
         if let Some(a) = self.agents.iter_mut().find(|a| a.id == id) {
             compute_options(
                 &self.cfg,
@@ -495,6 +528,7 @@ impl World {
                 a,
                 tick,
                 comfort,
+                mate,
             )
         } else {
             Vec::new()
@@ -550,23 +584,29 @@ impl World {
         let tick = self.tick;
         let mut events: Vec<LogEvent> = Vec::new();
 
-        // 日界：记忆习惯化回落与强度消退、地点整洁度恢复（清洁服务）、
-        // T2 背景代理的按天批量结算（LOD，M4）。
+        // 日界：记忆习惯化回落与强度消退（老龄怀旧者正负不对称）、
+        // 地点整洁度恢复（清洁服务）、T2 背景代理的按天批量结算（LOD，M4）。
         if is_day_boundary(tick) {
             for a in &mut self.agents {
-                a.memory.daily_decay();
+                let nostalgia = a.nostalgia(&self.cfg.params, tick);
+                a.memory.daily_decay(nostalgia);
             }
             let clean = self.cfg.params.clean_daily;
             for state in self.area_states.values_mut() {
                 state.daily_clean(clean);
             }
             // M5 经济：每日生活费（房租水电的抽象）——钱包不劳动就漏。
+            // 童年免单（家长抚养的抽象：孩子不因没工作而饿肚子）。
             let upkeep = self.cfg.params.daily_upkeep;
             if upkeep > 0.0 {
                 for a in &mut self.agents {
-                    a.wallet = (a.wallet - upkeep).max(0.0);
+                    if !a.is_child(&self.cfg.params, tick) {
+                        a.wallet = (a.wallet - upkeep).max(0.0);
+                    }
                 }
             }
+            // M5 二阶段：恋爱日结算（分手评估 + 概率生育 → 新生儿）。
+            self.romance_daily(tick, &mut events);
             self.settle_background_day(&mut events);
             // M5 职业流动：无业或经济压力大者每天评估一次（概率驱动，无剧本）。
             self.job_market_daily(tick, &mut events);
@@ -700,49 +740,81 @@ impl World {
             }
         }
 
-        // 动作完成结算：需求影响、习惯强化、睡眠恢复意志力、社交亲密增长。
+        // 动作完成结算：需求影响、习惯强化、睡眠恢复意志力、社交亲密增长；
+        // M5 二阶段新增：变体结算（口味效果与价格）、选定社交对象、
+        // 恋人加成与恋爱状态机、新奇需求结算、行为模仿（流行传播）。
         let alpha = self.cfg.params.alpha;
-        let completed: Vec<(usize, String)> = self
+        let completed: Vec<(usize, String, Option<String>)> = self
             .agents
             .iter()
             .enumerate()
             .filter(|(_, a)| matches!(&a.current, Some((_, _, end)) if tick >= *end))
-            .map(|(i, a)| (i, a.current.as_ref().unwrap().0.clone()))
+            .map(|(i, a)| {
+                (
+                    i,
+                    a.current.as_ref().unwrap().0.clone(),
+                    a.current_variant.clone(),
+                )
+            })
             .collect();
-        for (idx, bid) in completed {
+        for (idx, bid, variant) in completed {
             let def = self.behaviors.get(&bid).cloned();
+            let vdef = variant.as_ref().and_then(|v| {
+                def.as_ref()
+                    .and_then(|d| d.variants.iter().find(|x| x.id == *v).cloned())
+            });
+            // 选定的社交对象（M5 二阶段"和谁"）：决策时定，完成时结算。
+            let chosen_target = if def.as_ref().map(|d| d.pick_target).unwrap_or(false) {
+                self.agents[idx].social_target.take()
+            } else {
+                self.agents[idx].social_target = None;
+                None
+            };
             // 社交结算前先（只读）找同地点的同伴。
             // 一次社交时光最多与 3 位同伴结缘（按编号序）：密集世界里猫的
             // 注意力有限，也避免人人相识导致的 O(度数) 关系爆炸。
-            // 条目为 (对象, 对方是否玩家, 亲密增长折扣)。
+            // 条目为 (对象, 对方是否玩家, 亲密增长折扣)。选定对象排最前。
             let mut companions: Vec<(u32, bool, f64)> = Vec::new();
             if let Some(d) = &def {
                 if d.tags.iter().any(|t| t == "social") {
-                    if let Some(spot_id) = &d.spot {
-                        let spot_pos = self.spots.get(spot_id).map(|s| (s.x, s.y));
-                        if let Some(sp) = spot_pos {
-                            for oid in self.grid.query_radius(sp, 0.1) {
-                                if oid == idx as u32 || companions.len() >= 3 {
-                                    continue;
-                                }
-                                let o = &self.agents[oid as usize];
-                                let same_spot = o
-                                    .current
-                                    .as_ref()
-                                    .map(|(b, _, _)| {
-                                        self.behaviors.get(b).and_then(|x| x.spot.as_deref())
-                                            == Some(spot_id.as_str())
-                                    })
-                                    .unwrap_or(false);
-                                if same_spot {
-                                    companions.push((o.id, o.is_player, 1.0));
-                                }
+                    let remote = d.tags.iter().any(|t| t == "remote_social");
+                    if let Some(tid) = chosen_target {
+                        if let Some(o) = self.agents.get(tid as usize) {
+                            if o.id == tid {
+                                companions.push((
+                                    o.id,
+                                    o.is_player,
+                                    if remote { 0.6 } else { 1.0 },
+                                ));
                             }
                         }
-                    } else if d.tags.iter().any(|t| t == "remote_social") {
-                        // 远程社交（打电话，M4.5）：不要求同地点——从认识名单里
-                        // 随机挑一位聊几句（用代理自己的决策流，回放确定）。
-                        // 效果打折：隔着电话不如见面亲。
+                    }
+                    if !remote && d.spot.is_some() {
+                        // 同场社交：行为地点上的其他社交者（选定对象不重复计）。
+                        // 寻人社交的锚点 = 对方身边，正好覆盖"去找某人"的场景。
+                        let anchor = self.agents[idx].pos;
+                        for oid in self.grid.query_radius(anchor, 0.1) {
+                            if oid == idx as u32 || companions.len() >= 3 {
+                                continue;
+                            }
+                            if companions.iter().any(|(x, _, _)| *x == oid) {
+                                continue;
+                            }
+                            let o = &self.agents[oid as usize];
+                            let same_spot = o
+                                .current
+                                .as_ref()
+                                .map(|(b, _, _)| {
+                                    self.behaviors.get(b).and_then(|x| x.spot.as_deref())
+                                        == d.spot.as_deref()
+                                })
+                                .unwrap_or(false);
+                            if same_spot {
+                                companions.push((o.id, o.is_player, 1.0));
+                            }
+                        }
+                    } else if remote && chosen_target.is_none() {
+                        // 防御：远程社交没定到对象（正常不发生）时退回随机认识人。
                         let ids = self.relations.acquaintance_ids(idx as u32);
                         if !ids.is_empty() {
                             let pick = self.agents[idx]
@@ -758,17 +830,26 @@ impl World {
             let a = &mut self.agents[idx];
             let mut wallet_delta = 0.0f64;
             if let Some(def) = &def {
-                for (need, delta) in &def.effects {
+                // 变体效果叠加（更解馋的菜多回一点娱乐），价格挂变体。
+                let mut eff_map: BTreeMap<String, f64> = def.effects.clone();
+                if let Some(v) = &vdef {
+                    for (k, dv) in &v.effects {
+                        *eff_map.entry(k.clone()).or_insert(0.0) += dv;
+                    }
+                }
+                for (need, delta) in &eff_map {
                     a.needs.add(need, *delta);
                 }
                 // 睡眠类行为完成：恢复意志力。
                 if def.tags.iter().any(|t| t == "sleep") {
                     a.willpower = (a.willpower + 25.0).min(100.0);
                 }
-                // M5 经济：消费扣款 + 本班次工资入账。
-                if def.cost > 0.0 {
-                    a.wallet = (a.wallet - def.cost).max(0.0);
-                    wallet_delta -= def.cost;
+                // M5 经济：消费扣款 + 本班次工资入账。童年免单（家长付账）。
+                let price = vdef.as_ref().map(|v| v.price(def.cost)).unwrap_or(def.cost);
+                let child = a.is_child(&self.cfg.params, tick);
+                if price > 0.0 && !child {
+                    a.wallet = (a.wallet - price).max(0.0);
+                    wallet_delta -= price;
                 }
                 // 日薪制：每天只发一次（第二个班次是热爱，不是加钱）。
                 if let Some(jid) = a.job.clone() {
@@ -787,9 +868,17 @@ impl World {
                     }
                 }
             }
-            a.habit_boost(&bid, alpha);
+            a.habit_boost(&bid, alpha, self.cfg.params.habit_weight_cap);
+            if let Some(v) = &variant {
+                a.variant_boost(v, alpha, self.cfg.params.habit_weight_cap);
+                a.record_variant_exec(v);
+            }
             a.record_exec(&bid);
+            // 新奇需求结算（M5 二阶段流行传播的个体侧）：尝了鲜 → 满足；
+            // 又重复熟悉的事 → 更想换花样。
+            a.novelty_settle(&bid, &self.cfg.params);
             a.current = None;
+            a.current_variant = None;
             // 完成后的下次心跳：T1 常规代理慢一拍（LOD）；T0 维持灵敏。
             a.next_heartbeat = tick
                 + if a.lod == 1 {
@@ -846,19 +935,24 @@ impl World {
             events.push(LogEvent::ActionEnd {
                 tick,
                 agent: a.id,
-                behavior: bid,
+                behavior: bid.clone(),
             });
-            // M2：共同度过社交时光 → 亲密值增长（涉及玩家的陪伴更用心）。
+            // M2：共同度过社交时光 → 亲密值增长（涉及玩家的陪伴更用心）；
+            // M5 二阶段：恋人共同度过增长 ×couple_gain_mult（和心上人的时光更甜）。
             if !companions.is_empty() {
                 let me_id = a.id;
                 let me_player = a.is_player;
+                let couple_mult = self.cfg.params.couple_gain_mult;
                 for &(oid, other_player, discount) in companions.iter() {
+                    let lovers = self.relations.are_couple(me_id, oid);
                     let gain = if me_player || other_player {
                         self.cfg.params.bond_player_gain
                     } else {
                         self.cfg.params.bond_social_gain
-                    } * discount;
+                    } * discount
+                        * if lovers { couple_mult } else { 1.0 };
                     let value = self.relations.add_bond(me_id, oid, gain);
+                    self.agents[idx].last_social.insert(oid, tick);
                     events.push(LogEvent::BondChange {
                         tick,
                         a: me_id,
@@ -867,32 +961,78 @@ impl World {
                         value,
                     });
                 }
+                // 恋爱状态机（M5 二阶段）：与选定对象的互动中，双方单身且成年、
+                // 亲密达标 → 概率成为恋人。无剧本：对的人是概率选出来的。
+                if let Some(tid) = chosen_target {
+                    let p = &self.cfg.params;
+                    let (me_single, other_single, both_adult, both_human) = {
+                        let me = &self.agents[idx];
+                        let other = &self.agents[tid as usize];
+                        (
+                            self.relations.couple_of(me_id).is_none(),
+                            self.relations.couple_of(tid).is_none(),
+                            !me.is_child(p, tick) && !other.is_child(p, tick),
+                            me.species == "human" && other.species == "human",
+                        )
+                    };
+                    if me_single
+                        && other_single
+                        && both_adult
+                        && both_human
+                        && self.relations.bond(me_id, tid) >= p.couple_bond
+                        && self.agents[idx].rng_decision.next_f64() < p.couple_form_prob
+                    {
+                        self.relations.set_couple(me_id, tid, tick);
+                        self.stats.couples_formed += 1;
+                        events.push(LogEvent::Couple {
+                            tick,
+                            a: me_id,
+                            b: tid,
+                            started: true,
+                        });
+                    }
+                }
                 // M5 传闻（技术文档 4.5）：社交时光里把最显著的一段经历讲给同伴，
                 // 按亲密折扣写入"传闻:"记忆——与目睹同槽竞争，亲历更强时覆盖传闻。
+                // 接收方按自己的可塑性写入（M5 二阶段：童年学得快，老年学得慢）；
+                // 人物记忆随讲述扩散（"就是那个陈某某干的"）。
                 let top: Option<crate::memory::MemoryEntry> = self.agents[me_id as usize]
                     .memory
                     .entries
                     .iter()
                     .filter(|m| m.strength >= 0.35)
-                    .max_by(|x, y| x.strength.total_cmp(&y.strength).then(x.event.cmp(&y.event)))
+                    .max_by(|x, y| {
+                        x.strength
+                            .total_cmp(&y.strength)
+                            .then(x.event.cmp(&y.event))
+                    })
                     .cloned();
                 if let Some(m) = top {
                     for &(oid, _, _) in companions.iter() {
                         let ev_name = crate::memory::hearsay_event(&m.event);
                         let bond = self.relations.bond(me_id, oid);
                         let intensity = m.strength * (0.4 + 0.6 * bond);
+                        let plasticity =
+                            self.agents[oid as usize].plasticity(&self.cfg.params, tick);
                         let s = self.agents[oid as usize].memory.write(
                             &ev_name,
                             &m.tags,
                             m.quarter,
                             intensity,
-                            1.0,
+                            plasticity,
                             m.valence,
                             true,
                             m.mults.clone(),
                             tick,
                         );
                         if s >= 0.05 {
+                            if let Some(p) = m.person {
+                                self.agents[oid as usize].memory.set_person(
+                                    crate::memory::base_event(&ev_name),
+                                    m.quarter,
+                                    p,
+                                );
+                            }
                             events.push(LogEvent::MemoryWrite {
                                 tick,
                                 agent: oid,
@@ -904,6 +1044,61 @@ impl World {
                             });
                         }
                     }
+                }
+            }
+            // 行为模仿（M5 二阶段流行传播的社会侧）：完成行为时，观察半径内
+            // 的亲近同伴看见了——对同一行为（和选中的变体："她点的那杯看着
+            // 不错"）的权重各长一点。习惯的传染，与 M2 目睹同一思想
+            //（班杜拉观察学习），作用对象从记忆换成了习惯权重。
+            {
+                let actor_id = idx as u32;
+                let actor_pos = self.agents[idx].pos;
+                let observers: Vec<u32> = self
+                    .grid
+                    .query_radius(actor_pos, self.cfg.params.observe_radius)
+                    .into_iter()
+                    .filter(|&o| o != actor_id)
+                    .take(3)
+                    .collect();
+                for oid in observers {
+                    let bond = self.relations.bond(actor_id, oid);
+                    if bond < self.cfg.params.imitation_min_bond {
+                        continue;
+                    }
+                    // 只对"自己也做得了这件事"的观察者生效（人不会被猫种草
+                    // 磨爪子——权重表里没有的行为推不动，也不记日志）。
+                    let o = &mut self.agents[oid as usize];
+                    if !o.weights.contains_key(&bid) {
+                        continue;
+                    }
+                    // 只种没怎么做过的事（执行 ≤ 2 次）：看别人做新鲜事才想试，
+                    // 天天看的日常行为不产生"看了也想做"的棘轮——
+                    // 否则同屋的日常互相推高，公共空间的行为被相对挤死。
+                    let execs = o.exec_counts.get(&bid).copied().unwrap_or(0);
+                    if execs > 2 {
+                        continue;
+                    }
+                    let mult = 1.0 + self.cfg.params.imitation_habit * bond;
+                    let cap_ratio = self.cfg.params.habit_weight_cap;
+                    let cap = o.base_weights.get(&bid).copied().unwrap_or(1.0).max(1e-9)
+                        * cap_ratio.max(1.0);
+                    if let Some(w) = o.weights.get_mut(&bid) {
+                        *w = (*w * mult).min(cap);
+                    }
+                    if let Some(v) = &variant {
+                        let vexecs = o.variant_execs.get(v).copied().unwrap_or(0);
+                        if vexecs <= 2 && o.variant_weights.contains_key(v) {
+                            let w = o.variant_weights.get_mut(v).unwrap();
+                            *w = (*w * mult).min(cap_ratio.max(1.0));
+                        }
+                    }
+                    events.push(LogEvent::Imitate {
+                        tick,
+                        observer: oid,
+                        from: actor_id,
+                        behavior: bid.clone(),
+                        variant: variant.clone(),
+                    });
                 }
             }
             // M3 地点声誉：行为完成 = 一次到访体验。体验 = 需求净值（饿了吃饭
@@ -1003,8 +1198,7 @@ impl World {
                         * (1.0 - lighting * 0.5)
                         * (1.0 - patrol * 0.6)
                         * (1.0 - crowd * 0.4);
-                    let caught =
-                        self.agents[idx].rng_decision.next_f64() < p_caught;
+                    let caught = self.agents[idx].rng_decision.next_f64() < p_caught;
                     // 财物转移（被抓则当场归还）。
                     self.agents[thief_id as usize].wallet += stolen;
                     self.agents[vid as usize].wallet -= stolen;
@@ -1019,20 +1213,23 @@ impl World {
                     }
                     ctx_tags.sort();
                     ctx_tags.dedup();
+                    let v_plasticity = self.agents[vid as usize].plasticity(&self.cfg.params, tick);
                     let salience = self.agents[vid as usize].memory.write(
                         &spec.victim_event,
                         &ctx_tags,
                         quarter,
                         spec.victim_intensity,
-                        1.0,
+                        v_plasticity,
                         spec.victim_valence,
                         false,
                         spec.victim_mults.clone(),
                         tick,
                     );
-                    self.agents[vid as usize]
-                        .memory
-                        .set_person(&spec.victim_event, quarter, thief_id);
+                    self.agents[vid as usize].memory.set_person(
+                        &spec.victim_event,
+                        quarter,
+                        thief_id,
+                    );
                     if salience >= 0.05 {
                         events.push(LogEvent::MemoryWrite {
                             tick,
@@ -1077,12 +1274,13 @@ impl World {
                         t.current = None;
                         t.pending_command = Some(spec.service_behavior.clone());
                         t.next_heartbeat = tick + 1;
+                        let t_plasticity = t.plasticity(&self.cfg.params, tick);
                         let sal = t.memory.write(
                             "被捕",
                             &["crime".to_string()],
                             quarter,
                             0.9,
-                            1.0,
+                            t_plasticity,
                             -0.7,
                             false,
                             BTreeMap::from([("crime".to_string(), 0.25)]),
@@ -1119,6 +1317,7 @@ impl World {
 
         // 心跳决策（空闲且到期的代理；字段级借用避免冲突）。
         // T2 背景代理不逐拍决策（LOD）：它们的每一天在日界批量结算。
+        let species_index = &self.species_index;
         let agents = &mut self.agents;
         let cfg = &self.cfg;
         let behaviors = &self.behaviors;
@@ -1127,15 +1326,100 @@ impl World {
         let relations = &self.relations;
         let grid = &mut self.grid;
         for a in agents.iter_mut() {
-            if a.lod == 2 || a.current.is_some() || tick < a.next_heartbeat {
+            // T2 背景代理不逐拍决策（LOD）——但有待执行指令的除外
+            //（指令不该被背景层吞掉；正常只有玩家角色有指令、恒为 T0，
+            // 这里防御测试/工具直接给 NPC 塞指令的情况）。
+            if (a.lod == 2 && a.pending_command.is_none())
+                || a.current.is_some()
+                || tick < a.next_heartbeat
+            {
                 continue;
             }
             let comfort = comfort_of(grid, relations, &cfg.params, a);
-            events.extend(decide(cfg, behaviors, spots, area_states, a, tick, comfort));
+            let mate = relations.couple_of(a.id).is_some();
+            events.extend(decide(
+                cfg,
+                behaviors,
+                spots,
+                area_states,
+                a,
+                tick,
+                comfort,
+                mate,
+            ));
             self.decisions_done += 1;
             // 行为开始 → 移动到行为地点（无地点行为原地不动）。
             if let Some((bid, _, _)) = &a.current {
-                if let Some(spot_id) = behaviors.get(bid).and_then(|d| d.spot.clone()) {
+                let def = behaviors.get(bid);
+                if def.map(|d| d.pick_target).unwrap_or(false) {
+                    // 社交对象选择（M5 二阶段"和谁"）：
+                    // w = 亲密 × 新鲜度 × 可及性 × 人物记忆。
+                    // - 亲密：常在一起才想找；
+                    // - 新鲜度：刚聊过的人降权（防天天缠着同一人）；
+                    // - 可及性：目标越远越懒得住找（电话恒 1——认识就能打）；
+                    // - 人物记忆：被某人偷过 → 回避；欠过人情 → 亲近。
+                    // 面对面社交随后寻人移动到对方身边——主动找人玩。
+                    let remote = def
+                        .map(|d| d.tags.iter().any(|t| t == "remote_social"))
+                        .unwrap_or(false);
+                    let impressions = a.memory.person_impressions();
+                    let mut cands: Vec<TargetCand> = Vec::new();
+                    for oid in relations.acquaintance_ids(a.id) {
+                        let Some(species) = species_index.get(oid as usize) else {
+                            continue;
+                        };
+                        if *species != a.species {
+                            continue; // 找同类的社交（猫找人聊天就过了）
+                        }
+                        let bond = relations.bond(a.id, oid);
+                        let fresh = a.freshness(oid, tick, cfg.params.freshness_halflife_days);
+                        let reach = match (remote, grid.pos(oid)) {
+                            (true, _) => 1.0,
+                            (false, Some(tp)) => {
+                                1.0 / (1.0
+                                    + dist(a.pos, tp) / cfg.params.social_reach_radius.max(1.0))
+                            }
+                            (false, None) => continue,
+                        };
+                        let imp = impressions.get(&oid).copied().unwrap_or(1.0);
+                        if imp < 0.15 {
+                            continue; // 结仇的人不主动登门（被偷过还上门聊天就过了）
+                        }
+                        let w = (0.1 + bond) * fresh * reach * imp;
+                        if w > 1e-6 {
+                            cands.push(TargetCand {
+                                id: oid,
+                                w,
+                                bond,
+                                fresh,
+                                reach,
+                                imp,
+                            });
+                        }
+                    }
+                    if !cands.is_empty() {
+                        let ws: Vec<f64> = cands.iter().map(|c| c.w).collect();
+                        let pick = softmax_pick(&ws, a.temperature, &mut a.rng_decision);
+                        let c = cands[pick].clone();
+                        a.social_target = Some(c.id);
+                        events.push(LogEvent::SocialPick {
+                            tick,
+                            agent: a.id,
+                            target: c.id,
+                            bond: c.bond,
+                            freshness: c.fresh,
+                            reach: c.reach,
+                            impression: c.imp,
+                        });
+                        // 寻人移动：走到对方身边（电话不用腿）。
+                        if !remote {
+                            if let Some(tp) = grid.pos(c.id) {
+                                a.pos = (tp.0 + 0.3, tp.1 + 0.1);
+                                grid.move_to(a.id, a.pos);
+                            }
+                        }
+                    }
+                } else if let Some(spot_id) = def.and_then(|d| d.spot.clone()) {
                     if let Some(sd) = spots.get(&spot_id) {
                         a.pos = (sd.x, sd.y);
                         grid.move_to(a.id, a.pos);
@@ -1145,6 +1429,86 @@ impl World {
         }
 
         self.emit(events);
+    }
+
+    /// M5 二阶段：恋爱与生育的日结算。
+    /// - 分手：恋人间亲密跌破分手线（关系要靠互动维持）；
+    /// - 生育：成年恋人、亲密达标、恋爱满冷静期、人口未满 → 概率添丁。
+    ///   新生儿：继承父母习惯权重（含变体口味）、童年高可塑、与父母天生亲近。
+    fn romance_daily(&mut self, tick: Tick, events: &mut Vec<LogEvent>) {
+        let p = &self.cfg.params;
+        // 分手评估（确定性阈值：跌破就散，无骰子——感情的裂缝不需要随机）。
+        for (a, b, _) in self.relations.couple_pairs() {
+            if self.relations.bond(a, b) < p.couple_break_bond {
+                self.relations.break_couple(a, b);
+                events.push(LogEvent::Couple {
+                    tick,
+                    a,
+                    b,
+                    started: false,
+                });
+            }
+        }
+        // 生育评估（恋人们的骰子按键序掷，独立子流）。
+        let mut newborns: Vec<(u32, u32)> = Vec::new();
+        for (a, b, since) in self.relations.couple_pairs() {
+            if tick.saturating_sub(since) < p.birth_min_couple_days * crate::time::TICKS_PER_DAY {
+                continue;
+            }
+            if self.relations.bond(a, b) < p.couple_bond {
+                continue;
+            }
+            let both_adult = !self.agents[a as usize].is_child(p, tick)
+                && !self.agents[b as usize].is_child(p, tick);
+            if !both_adult {
+                continue;
+            }
+            if p.max_population > 0 && self.agents.len() >= p.max_population {
+                continue;
+            }
+            if self.life_rng.next_f64() < p.birth_prob {
+                newborns.push((a, b));
+            }
+        }
+        // 落户：新成员追加在队尾（编号 = 下标的不变量保持），初始为 T2 背景，
+        // 下一个小时的 LOD 重分配再决定它的层。
+        for (a, b) in newborns {
+            let id = self.agents.len() as u32;
+            if id != a && id != b {
+                // 名字：随 a 姓、取 b 名的末字（陈晓东 × 林雨桐 → 陈小桐）。
+                let surname = self.agents[a as usize].name.chars().next().unwrap_or('小');
+                let tail = self.agents[b as usize].name.chars().last().unwrap_or('宝');
+                let name = format!("{surname}小{tail}");
+                let behaviors = self.cfg.species_behaviors("human");
+                let (mother, father) = (&self.agents[a as usize], &self.agents[b as usize]);
+                let mpos = mother.pos;
+                let mut baby = Agent::born(
+                    self.world_seed,
+                    id,
+                    name,
+                    "human".to_string(),
+                    &behaviors,
+                    &self.cfg.params,
+                    (mother, father),
+                    tick,
+                );
+                baby.pos = mpos;
+                baby.lod = 2;
+                baby.next_heartbeat = tick + 30;
+                self.agents.push(baby);
+                self.species_index.push("human".to_string());
+                self.grid.move_to(id, mpos);
+                self.relations.set_bond(id, a, p.parent_bond);
+                self.relations.set_bond(id, b, p.parent_bond);
+                self.stats.births += 1;
+                events.push(LogEvent::Born {
+                    tick,
+                    agent: id,
+                    mother: a,
+                    father: b,
+                });
+            }
+        }
     }
 
     /// M5 职业市场（设计稿 5.3 职业选择公式）：日界评估。
@@ -1158,11 +1522,12 @@ impl World {
         }
         let poverty = self.cfg.params.poverty_line;
         for idx in 0..self.agents.len() {
-            // 只有树里用职业门的物种参加（猫不找工作）。
+            // 只有树里用职业门的物种参加（猫不找工作）；童年也不找（先长大）。
             if !tree_uses_jobs(
                 self.cfg.tree_for(&self.agents[idx].species),
                 &self.cfg.subtrees,
-            ) {
+            ) || self.agents[idx].is_child(&self.cfg.params, tick)
+            {
                 continue;
             }
             let (pressure, honesty, current) = {
@@ -1173,7 +1538,12 @@ impl World {
                     a.job.clone(),
                 )
             };
-            let restless = current.is_none() || pressure > 0.5;
+            let restless = match current.as_ref() {
+                None => true,
+                // 在岗者只在真正走投无路时才考虑挪窝（离职冷静期：
+                // 压力线上下的穷忙族不该像日结工一样天天换岗）。
+                Some(_) => pressure > 0.8,
+            };
             if !restless {
                 continue;
             }
@@ -1190,9 +1560,11 @@ impl World {
             // 犯罪史记忆（设计稿 5.2）：被捕经历压制非法行当的吸引力——
             // "被抓住后转正当职业"的机制载体，而非写死的剧情。
             let crime_mult = {
-                let mem = self.agents[idx]
-                    .memory
-                    .query(quarter_of_day(tick), &["crime".to_string()], 0.0);
+                let mem = self.agents[idx].memory.query(
+                    quarter_of_day(tick),
+                    &["crime".to_string()],
+                    0.0,
+                );
                 mem.get("crime").copied().unwrap_or(1.0)
             };
             let mut cands: Vec<(Option<String>, f64)> = self
@@ -1219,8 +1591,10 @@ impl World {
                     )
                 })
                 .collect();
-            // 无业也是选项（低权重）——不是人人都会立刻上岗。
-            cands.push((None, 0.3));
+            // 无业也是选项——但穷人不歇业（压力越高越不可能"歇一阵"）。
+            // 这也让非法行当有了黏性：走上歪路的人不会第二天无故金盆洗手，
+            // 出口是被捕开除或找到正经岗位（就业挤出犯罪，设计稿 5.3）。
+            cands.push((None, 0.3 * (1.2 - pressure).max(0.05)));
             let weights: Vec<f64> = cands.iter().map(|(_, w)| *w).collect();
             let pick = softmax_pick(&weights, 1.0, &mut self.agents[idx].rng_decision);
             let chosen = cands[pick].0.clone();
@@ -1307,12 +1681,13 @@ impl World {
             if immune {
                 continue;
             }
+            let plasticity = a.plasticity(&self.cfg.params, self.tick);
             let salience = a.memory.write(
                 &def.id,
                 &ctx_tags,
                 quarter,
                 def.intensity,
-                1.0,
+                plasticity,
                 def.valence,
                 false,
                 def.behavior_mults.clone(),
@@ -1337,6 +1712,8 @@ impl World {
                 && a.current.is_some()
             {
                 a.current = None;
+                a.current_variant = None;
+                a.social_target = None;
                 a.next_heartbeat = tick;
                 events.push(LogEvent::Startled {
                     tick,
@@ -1379,12 +1756,13 @@ impl World {
                 }
                 let ev_name = crate::memory::vicarious_event(&def.id);
                 let intensity = def.intensity * bond * imitation;
+                let plasticity = a.plasticity(&self.cfg.params, self.tick);
                 let s = a.memory.write(
                     &ev_name,
                     &ctx_tags,
                     quarter,
                     intensity,
-                    1.0,
+                    plasticity,
                     def.valence,
                     true,
                     def.behavior_mults.clone(),
@@ -1419,11 +1797,14 @@ impl World {
             if self.agents[idx].lod != 2 {
                 continue;
             }
+            let mate = self.relations.couple_of(self.agents[idx].id).is_some();
             for hour in [3u32, 9, 15, 21] {
                 // 本时段前先扣掉一整天的需求衰减（T2 不做逐拍衰减；
                 // 升降层切换日的几小时误差属于统计近似的固有精度）。
                 if hour == 3 {
-                    self.agents[idx].needs.decay(&self.cfg.needs, crate::time::TICKS_PER_DAY);
+                    self.agents[idx]
+                        .needs
+                        .decay(&self.cfg.needs, crate::time::TICKS_PER_DAY);
                 }
                 // 简化树：门放行的行为（需求门 + 时间门，与完整树同规）。
                 let mut ids: Vec<&str> = Vec::new();
@@ -1434,12 +1815,18 @@ impl World {
                     &self.cfg.subtrees,
                     self.agents[idx].job.as_deref(),
                     hour,
+                    mate,
                     &mut ids,
                 );
+                let child = self
+                    .agents
+                    .get(idx)
+                    .map(|a| a.is_child(&self.cfg.params, self.tick))
+                    .unwrap_or(false);
                 let avail: Vec<String> = ids
                     .into_iter()
                     .map(|s| s.to_string())
-                    .filter(|b| self.behaviors[b].cost <= self.agents[idx].wallet + 1e-9)
+                    .filter(|b| child || self.behaviors[b].cost <= self.agents[idx].wallet + 1e-9)
                     .collect();
                 if avail.is_empty() {
                     continue;
@@ -1447,9 +1834,7 @@ impl World {
                 // 生理反射批量版：任一需求临界 → 可用的最强恢复行为。
                 let forced = NEED_KEYS
                     .iter()
-                    .find(|need| {
-                        self.agents[idx].needs.get(need).unwrap_or(100.0) < critical
-                    })
+                    .find(|need| self.agents[idx].needs.get(need).unwrap_or(100.0) < critical)
                     .and_then(|need| {
                         avail
                             .iter()
@@ -1474,8 +1859,7 @@ impl World {
                                 };
                                 // 与完整模拟同规的人格/压力修正（简化选择不减规则）。
                                 if def.honesty_bias != 0.0 {
-                                    w *= 1.0
-                                        + def.honesty_bias * (a.honesty - 0.5) * 2.0;
+                                    w *= 1.0 + def.honesty_bias * (a.honesty - 0.5) * 2.0;
                                 }
                                 if def.pressure_bias > 0.0 {
                                     w *= 1.0
@@ -1485,6 +1869,8 @@ impl World {
                                                 self.cfg.params.poverty_line,
                                             );
                                 }
+                                // 与完整模拟同规的新奇需求（流行传播不减规则）。
+                                w *= a.novelty_mult(&b, &self.cfg.params);
                                 (b, w * nm)
                             })
                             .collect();
@@ -1492,25 +1878,48 @@ impl World {
                         scored.truncate(top_k.max(1));
                         let effs: Vec<f64> = scored.iter().map(|(_, e)| *e).collect();
                         let temp = self.agents[idx].temperature;
-                        let pick = softmax_pick(
-                            &effs,
-                            temp,
-                            &mut self.agents[idx].rng_decision,
-                        );
+                        let pick = softmax_pick(&effs, temp, &mut self.agents[idx].rng_decision);
                         scored.swap_remove(pick).0
                     }
                 };
                 // 立即结算：需求效果、意志力恢复、习惯强化、到访体验。
+                // 变体同规（M5 二阶段：背景居民也有口味）。
                 let def = self.behaviors[&choice].clone();
+                let variant = pick_variant(
+                    &def,
+                    &self.spots,
+                    &mut self.agents[idx],
+                    &self.cfg.params,
+                    self.tick,
+                    None,
+                );
+                let vdef = variant
+                    .as_ref()
+                    .and_then(|v| def.variants.iter().find(|x| x.id == *v).cloned());
                 let a = &mut self.agents[idx];
-                for (need, delta) in &def.effects {
+                let mut eff_map: BTreeMap<String, f64> = def.effects.clone();
+                if let Some(v) = &vdef {
+                    for (k, dv) in &v.effects {
+                        *eff_map.entry(k.clone()).or_insert(0.0) += dv;
+                    }
+                }
+                for (need, delta) in &eff_map {
                     a.needs.add(need, *delta);
                 }
                 if def.tags.iter().any(|t| t == "sleep") {
                     a.willpower = (a.willpower + 25.0).min(100.0);
                 }
-                a.habit_boost(&choice, alpha);
+                let price = vdef.as_ref().map(|v| v.price(def.cost)).unwrap_or(def.cost);
+                if price > 0.0 && !child {
+                    a.wallet = (a.wallet - price).max(0.0);
+                }
+                a.habit_boost(&choice, alpha, self.cfg.params.habit_weight_cap);
+                if let Some(v) = &variant {
+                    a.variant_boost(v, alpha, self.cfg.params.habit_weight_cap);
+                    a.record_variant_exec(v);
+                }
                 a.record_exec(&choice);
+                a.novelty_settle(&choice, &self.cfg.params);
                 let area_id = def
                     .spot
                     .as_ref()
@@ -1571,6 +1980,7 @@ impl World {
             }
         };
         let comfort = self.agent_comfort(agent_id);
+        let mate = self.relations.couple_of(agent_id).is_some();
         let a = self.agents.iter_mut().find(|a| a.id == agent_id).unwrap();
         let options = compute_options(
             &self.cfg,
@@ -1580,6 +1990,7 @@ impl World {
             a,
             tick,
             comfort,
+            mate,
         );
         // 生理反射压倒一切：临界需求未解决时，只接受对应的恢复行为。
         let forced = forced_choice(&self.cfg, &self.behaviors, &a.needs, &options);
@@ -1590,55 +2001,53 @@ impl World {
         // - 戒断目标进行中 → 违约加价（行为树从不禁止指令，只收代价）。
         let auto_ratio = self.cfg.params.habit_auto_ratio;
         let fear_gate = self.cfg.params.fear_mem_mult;
-        let (mut cost, refusal, automated, feared) = match options
-            .iter()
-            .find(|o| o.behavior == behavior)
-        {
-            Some(o) => {
-                let eff_max = options
-                    .iter()
-                    .map(|o| o.eff)
-                    .fold(f64::NEG_INFINITY, f64::max);
-                let ratio = if eff_max > 0.0 {
-                    (o.eff / eff_max).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                let automated = a.is_automated(behavior, auto_ratio);
-                let base = if automated {
-                    0.0
-                } else {
-                    5.0 + 20.0 * (1.0 - ratio)
-                };
-                let feared = o.mem_mult < fear_gate;
-                (
-                    base + if feared {
-                        self.cfg.params.fear_command_cost
+        let (mut cost, refusal, automated, feared) =
+            match options.iter().find(|o| o.behavior == behavior) {
+                Some(o) => {
+                    let eff_max = options
+                        .iter()
+                        .map(|o| o.eff)
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    let ratio = if eff_max > 0.0 {
+                        (o.eff / eff_max).clamp(0.0, 1.0)
                     } else {
+                        1.0
+                    };
+                    let automated = a.is_automated(behavior, auto_ratio);
+                    let base = if automated {
                         0.0
-                    },
-                    None,
-                    automated,
-                    feared,
-                )
-            }
-            None if forced.as_deref() == Some(behavior) => (3.0, None, false, false),
-            None if forced.is_some() => (
-                0.0,
-                Some("它生理需求告急，现在听不进别的".to_string()),
-                false,
-                false,
-            ),
-            None => (
-                0.0,
-                Some(format!(
-                    "它现在没这个念头（{}）",
-                    gate_note(&self.cfg, &def)
-                )),
-                false,
-                false,
-            ),
-        };
+                    } else {
+                        5.0 + 20.0 * (1.0 - ratio)
+                    };
+                    let feared = o.mem_mult < fear_gate;
+                    (
+                        base + if feared {
+                            self.cfg.params.fear_command_cost
+                        } else {
+                            0.0
+                        },
+                        None,
+                        automated,
+                        feared,
+                    )
+                }
+                None if forced.as_deref() == Some(behavior) => (3.0, None, false, false),
+                None if forced.is_some() => (
+                    0.0,
+                    Some("它生理需求告急，现在听不进别的".to_string()),
+                    false,
+                    false,
+                ),
+                None => (
+                    0.0,
+                    Some(format!(
+                        "它现在没这个念头（{}）",
+                        gate_note(&self.cfg, &def)
+                    )),
+                    false,
+                    false,
+                ),
+            };
         if let Some(reason) = refusal {
             let out = CommandOutcome {
                 accepted: false,
@@ -1697,6 +2106,8 @@ impl World {
         }
         if interrupting {
             if let Some((bid, _, _)) = a.current.take() {
+                a.social_target = None;
+                a.current_variant = None;
                 notes.push(LogEvent::ActionEnd {
                     tick,
                     agent: agent_id,
@@ -1752,6 +2163,7 @@ impl World {
         };
         let tick = self.tick;
         let comfort = comfort_of(&self.grid, &self.relations, &self.cfg.params, a);
+        let mate = self.relations.couple_of(agent_id).is_some();
         let options = compute_options(
             &self.cfg,
             &self.behaviors,
@@ -1760,6 +2172,7 @@ impl World {
             a,
             tick,
             comfort,
+            mate,
         );
         let eff_max = options
             .iter()
@@ -1790,7 +2203,7 @@ impl World {
                             5.0 + 20.0 * (1.0 - ratio)
                         } + if feared { fear_cost } else { 0.0 }
                             + if goal_avoided { goal_cost } else { 0.0 })
-                            .round();
+                        .round();
                         BehaviorStatus {
                             id: bid.clone(),
                             name: def.display_name().to_string(),
@@ -1821,27 +2234,51 @@ impl World {
 
     /// 给玩家角色设一个戒断目标（设计稿 4.5）：`days` 天内不做 `behavior`。
     /// 只能指挥玩家角色；同一行为同时只有一个目标。
-    pub fn set_goal(&mut self, agent_id: u32, behavior: &str, days: u64) -> Result<(), String> {
+    /// M5 二阶段：目标键可以是 "行为#变体"——精确到"不吃泡面"
+    ///（同行为的其他口味不受影响）。
+    pub fn set_goal(&mut self, agent_id: u32, key: &str, days: u64) -> Result<(), String> {
         let tick = self.tick;
-        let a = self
+        let ai = self
             .agents
-            .iter_mut()
-            .find(|a| a.id == agent_id && a.is_player)
+            .iter()
+            .position(|a| a.id == agent_id && a.is_player)
             .ok_or("只能给玩家角色定目标")?;
-        if !a.weights.contains_key(behavior) {
-            return Err(format!(
-                "它不会做【{behavior}】（不在它的行为树上）"
-            ));
+        let (bid, vid) = match key.split_once('#') {
+            Some((b, v)) => (b.to_string(), Some(v.to_string())),
+            None => (key.to_string(), None),
+        };
+        if !self.agents[ai].weights.contains_key(&bid) {
+            return Err(format!("它不会做【{bid}】（不在它的行为树上）"));
         }
-        if a.goals.iter().any(|g| g.is_active(tick) && g.behavior == behavior) {
-            return Err(format!("【{behavior}】已有进行中的目标"));
+        if let Some(v) = &vid {
+            let known = self
+                .behaviors
+                .get(&bid)
+                .map(|d| d.variants.iter().any(|x| x.id == *v))
+                .unwrap_or(false);
+            if !known {
+                return Err(format!("【{bid}】没有【{v}】这个选择"));
+            }
+        }
+        let display = match &vid {
+            Some(v) => format!("{bid}#{v}"),
+            None => bid.clone(),
+        };
+        if self.agents[ai]
+            .goals
+            .iter()
+            .any(|g| g.is_active(tick) && g.behavior == display)
+        {
+            return Err(format!("【{display}】已有进行中的目标"));
         }
         let deadline = tick + days * crate::time::TICKS_PER_DAY;
-        a.goals.push(Goal::new(behavior, tick, deadline));
+        self.agents[ai]
+            .goals
+            .push(Goal::new(display.as_str(), tick, deadline));
         self.note(LogEvent::GoalSet {
             tick,
             agent: agent_id,
-            behavior: behavior.to_string(),
+            behavior: display,
             deadline,
         });
         Ok(())
@@ -2017,6 +2454,12 @@ impl World {
                 .into_iter()
                 .map(|(id, b)| (name_of(id), b))
                 .collect();
+            let lover = self.relations.couple_of(a.id).and_then(|lid| {
+                self.agents
+                    .iter()
+                    .find(|x| x.id == lid)
+                    .map(|x| x.name.clone())
+            });
             summaries.push(AgentSummary {
                 id: a.id,
                 name: a.name.clone(),
@@ -2030,6 +2473,8 @@ impl World {
                     .map(|(s, t)| format!("[强度{:.2}] {}", s, t))
                     .collect(),
                 top_bonds,
+                age_days: a.age_days(self.tick),
+                lover,
             });
         }
         let areas: Vec<AreaSummary> = self
@@ -2052,6 +2497,8 @@ impl World {
 
 /// 决策核心（自由函数：cfg/behaviors/spots 只读，代理可变）。
 /// 返回 [GoalResist/GoalViolation…]、[Decision, ActionStart] 日志事件。
+/// mate（M5 二阶段）：有恋人 → 伴侣门放行约会分支。
+#[allow(clippy::too_many_arguments)]
 fn decide(
     cfg: &SimConfig,
     behaviors: &BTreeMap<String, BehaviorDef>,
@@ -2060,8 +2507,9 @@ fn decide(
     a: &mut Agent,
     tick: Tick,
     comfort: f64,
+    mate: bool,
 ) -> Vec<LogEvent> {
-    let options = compute_options(cfg, behaviors, spots, area_states, a, tick, comfort);
+    let options = compute_options(cfg, behaviors, spots, area_states, a, tick, comfort, mate);
     let auto_ratio = cfg.params.habit_auto_ratio;
     // 限期目标对抗过程中产生的事件（忍住/失守），排在 Decision 之前。
     let mut extra: Vec<LogEvent> = Vec::new();
@@ -2252,6 +2700,46 @@ fn decide(
         }
     };
 
+    // 变体选择（M5 二阶段，方案 B）：带变体的行为再选一次"哪个变体"——
+    // 菜单挂地点（这里能点到什么）、付得起的进候选、softmax 走变体权重。
+    let mut variant = behaviors
+        .get(&choice)
+        .and_then(|d| pick_variant(d, spots, a, &cfg.params, tick, None));
+
+    // 变体级戒断目标（"不吃泡面"）：选中的口味撞上戒断——
+    // 忍住换一个口味（消耗意志力），没有别的可选就失守；
+    // 玩家指令促成的（你让它去吃饭，它偏偏点了泡面）直接记违约。
+    if a.is_player {
+        if let Some(v) = variant.clone() {
+            if let Some(gi) = a.active_goal_idx_var(&choice, Some(v.as_str()), tick) {
+                let key = format!("{choice}#{v}");
+                let cost = cfg.params.goal_resist_cost;
+                let alt = behaviors
+                    .get(&choice)
+                    .and_then(|d| pick_variant(d, spots, a, &cfg.params, tick, Some(v.as_str())));
+                if a.willpower + 1e-9 >= cost && alt.is_some() {
+                    a.willpower -= cost;
+                    a.goals[gi].resists += 1;
+                    extra.push(LogEvent::GoalResist {
+                        tick,
+                        agent: a.id,
+                        behavior: key,
+                        cost,
+                    });
+                    variant = alt;
+                } else {
+                    a.goals[gi].violations += 1;
+                    extra.push(LogEvent::GoalViolation {
+                        tick,
+                        agent: a.id,
+                        behavior: key,
+                        commanded: factors.will_command,
+                    });
+                }
+            }
+        }
+    }
+
     // 设置动作。
     let def = behaviors.get(&choice);
     let duration = match def {
@@ -2260,6 +2748,7 @@ fn decide(
     };
     let until = tick + duration;
     a.current = Some((choice.clone(), tick, until));
+    a.current_variant = variant.clone();
     a.next_heartbeat = until;
 
     extra.push(LogEvent::Decision {
@@ -2274,6 +2763,7 @@ fn decide(
         agent: a.id,
         behavior: choice,
         until,
+        variant,
     });
     extra
 }
@@ -2295,7 +2785,7 @@ fn comfort_of(grid: &SpatialGrid, relations: &Relations, params: &Params, a: &Ag
 
 /// 计算当前全部可用行为及其权重分解（决策、菜单、指令定价共用）。
 /// 物种决定用哪棵树；同一地点的行为共享一次记忆查询与地点乘数
-/// （两者都只依赖地点与时段）。
+/// （两者都只依赖地点与时段）。mate 放行伴侣门分支（M5 二阶段）。
 #[allow(clippy::too_many_arguments)]
 fn compute_options(
     cfg: &SimConfig,
@@ -2305,6 +2795,7 @@ fn compute_options(
     a: &mut Agent,
     tick: Tick,
     comfort: f64,
+    mate: bool,
 ) -> Vec<ChoiceInfo> {
     let mut avail: Vec<&str> = Vec::new();
     available_behaviors(
@@ -2314,11 +2805,14 @@ fn compute_options(
         &cfg.subtrees,
         a.job.as_deref(),
         hour_of(tick) as u32,
+        mate,
         &mut avail,
     );
     // M5 资源门槛：付不起的行为不进候选（钱包见底时只剩免费选项，
     // 泡面与在家吃饭——贫困的形态由内容决定，机制只管门槛）。
-    avail.retain(|b| behaviors[*b].cost <= a.wallet + 1e-9);
+    // 童年免单（M5 二阶段，家长付账）。
+    let child = a.is_child(&cfg.params, tick);
+    avail.retain(|b| child || behaviors[*b].cost <= a.wallet + 1e-9);
     // M5 人格与经济压力（设计稿 5.2 犯罪权重公式的通用旋钮）。
     let honesty = a.honesty;
     let pressure = economic_pressure(a.wallet, cfg.params.poverty_line);
@@ -2369,6 +2863,13 @@ fn compute_options(
             }
             if def.pressure_bias > 0.0 {
                 eff *= 1.0 + def.pressure_bias * pressure;
+            }
+            // M5 二阶段 流行传播：新奇需求乘数——重复熟悉的事攒"想换花样"，
+            // 没做过的事显著加权。个体差异：探索性温度高的人先去尝鲜。
+            // 正被恐惧抑制的行为除外：好奇心不顶替恐惧（被吓怕的公园
+            // 不会因为"没怎么去过"而变得诱人）。
+            if mm >= cfg.params.fear_mem_mult {
+                eff *= a.novelty_mult(b, &cfg.params);
             }
             ChoiceInfo {
                 behavior: b.to_string(),
@@ -2421,16 +2922,70 @@ pub fn economic_pressure(wallet: f64, poverty_line: f64) -> f64 {
     1.0 - (wallet / poverty_line.max(1.0)).clamp(0.0, 1.0)
 }
 
+/// 社交对象选择的候选（M5 二阶段）：带四项因素的当时值，日志可解释。
+#[derive(Debug, Clone)]
+struct TargetCand {
+    id: u32,
+    w: f64,
+    bond: f64,
+    fresh: f64,
+    reach: f64,
+    imp: f64,
+}
+
+/// 变体选择（M5 二阶段吃什么）：
+/// 菜单过滤（地点菜单非空时只能从中选）→ 付得起过滤（童年免单）→
+/// softmax（变体权重，温度同代理）。exclude 供戒断目标"换个口味"重选。
+/// 返回选中的变体 ID；行为无变体或全都不可得 → None（按行为本体结算）。
+fn pick_variant(
+    def: &BehaviorDef,
+    spots: &BTreeMap<String, SpotDef>,
+    a: &mut Agent,
+    params: &Params,
+    tick: Tick,
+    exclude: Option<&str>,
+) -> Option<String> {
+    if def.variants.is_empty() {
+        return None;
+    }
+    let child = a.is_child(params, tick);
+    let menu: Option<Vec<String>> = def
+        .spot
+        .as_ref()
+        .and_then(|s| spots.get(s))
+        .map(|s| s.menu.clone())
+        .filter(|m| !m.is_empty());
+    let eligible: Vec<&VariantDef> = def
+        .variants
+        .iter()
+        .filter(|v| Some(v.id.as_str()) != exclude)
+        .filter(|v| menu.as_ref().is_none_or(|m| m.contains(&v.id)))
+        .filter(|v| child || v.price(def.cost) <= a.wallet + 1e-9)
+        .collect();
+    if eligible.is_empty() {
+        return None;
+    }
+    let ws: Vec<f64> = eligible
+        .iter()
+        .map(|v| a.variant_weights.get(&v.id).copied().unwrap_or(1.0))
+        .collect();
+    let pick = softmax_pick(&ws, a.temperature, &mut a.rng_decision);
+    Some(eligible[pick].id.clone())
+}
+
 /// 树里是否用到职业门（职业分配只面向有工作分支的物种）。
-fn tree_uses_jobs(node: &crate::config::TreeNode, subtrees: &BTreeMap<String, crate::config::TreeNode>) -> bool {
+fn tree_uses_jobs(
+    node: &crate::config::TreeNode,
+    subtrees: &BTreeMap<String, crate::config::TreeNode>,
+) -> bool {
     use crate::config::TreeNode;
     match node {
         TreeNode::Selector { children } => children.iter().any(|c| tree_uses_jobs(c, subtrees)),
         // 职业门本身就是"这棵树用职业"的标志。
         TreeNode::JobGate { .. } => true,
-        TreeNode::Gate { child, .. } | TreeNode::TimeGate { child, .. } => {
-            tree_uses_jobs(child, subtrees)
-        }
+        TreeNode::Gate { child, .. }
+        | TreeNode::TimeGate { child, .. }
+        | TreeNode::MateGate { child } => tree_uses_jobs(child, subtrees),
         TreeNode::Subtree { tree_ref } => subtrees
             .get(tree_ref)
             .map(|t| tree_uses_jobs(t, subtrees))

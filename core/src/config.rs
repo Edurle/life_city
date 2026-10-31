@@ -51,21 +51,17 @@ impl SimConfig {
     }
 }
 
-fn collect_actions(
-    node: &TreeNode,
-    subtrees: &BTreeMap<String, TreeNode>,
-    out: &mut Vec<String>,
-) {
+fn collect_actions(node: &TreeNode, subtrees: &BTreeMap<String, TreeNode>, out: &mut Vec<String>) {
     match node {
         TreeNode::Selector { children } => {
             for c in children {
                 collect_actions(c, subtrees, out);
             }
         }
-        TreeNode::Gate { child, .. } | TreeNode::TimeGate { child, .. } => {
-            collect_actions(child, subtrees, out)
-        }
-        TreeNode::JobGate { child, .. } => collect_actions(child, subtrees, out),
+        TreeNode::Gate { child, .. }
+        | TreeNode::TimeGate { child, .. }
+        | TreeNode::JobGate { child, .. }
+        | TreeNode::MateGate { child } => collect_actions(child, subtrees, out),
         TreeNode::Subtree { tree_ref } => {
             if let Some(sub) = subtrees.get(tree_ref) {
                 collect_actions(sub, subtrees, out);
@@ -314,6 +310,71 @@ pub struct Params {
     /// 每日生活费（M5，房租水电的抽象）：日界统一扣减。0 = 无此机制。
     #[serde(default)]
     pub daily_upkeep: f64,
+    // ---------- M5 二阶段：社交对象选择与恋爱 ----------
+    /// 面对面社交的寻人范围（米）：目标越远权重越低（可及性项的分母），
+    /// 但不硬性排除——想见的人走两条街也去（寻人移动）。
+    #[serde(default = "d_social_reach_radius")]
+    pub social_reach_radius: f64,
+    /// 新鲜度半衰期（天）：刚聊过的人降权，隔几天恢复——防天天缠着同一人。
+    #[serde(default = "d_freshness_halflife")]
+    pub freshness_halflife_days: f64,
+    /// 恋爱门槛：两人亲密值达到此值才可能成为恋人（概率评估，无剧本）。
+    #[serde(default = "d_couple_bond")]
+    pub couple_bond: f64,
+    /// 分手线：恋人间亲密值跌破此值，日界评估分手。
+    #[serde(default = "d_couple_break_bond")]
+    pub couple_break_bond: f64,
+    /// 亲密达标的社交互动中"成为恋人"的概率（每次互动掷一次）。
+    #[serde(default = "d_couple_form_prob")]
+    pub couple_form_prob: f64,
+    /// 恋人共同度过社交时光的亲密增长倍率。
+    #[serde(default = "d_couple_gain_mult")]
+    pub couple_gain_mult: f64,
+    // ---------- M5 二阶段：老龄与代际 ----------
+    /// 童年时长（模拟日）：高可塑期，不工作、不由自己付账（家长抚养的抽象）。
+    #[serde(default = "d_childhood_days")]
+    pub childhood_days: u64,
+    /// 老龄起点（模拟日，从出生算）：可塑性下降、怀旧倾向出现。
+    #[serde(default = "d_old_age_days")]
+    pub old_age_days: u64,
+    /// 童年记忆可塑性（写入强度乘数，设计稿 3.1"童年期远高于成年期"）。
+    #[serde(default = "d_child_plasticity")]
+    pub child_plasticity: f64,
+    /// 老年记忆可塑性（新记忆写入变慢）。
+    #[serde(default = "d_elder_plasticity")]
+    pub elder_plasticity: f64,
+    /// 怀旧强度（0..1，老龄激活）：正面记忆消退更慢、负面消退更快。
+    #[serde(default = "d_elder_nostalgia")]
+    pub elder_nostalgia: f64,
+    /// 恋人生育概率（每对每天，双方成年且亲密达标才掷）。
+    #[serde(default = "d_birth_prob")]
+    pub birth_prob: f64,
+    /// 恋爱多少天后才可能生育（天）。
+    #[serde(default = "d_birth_min_couple_days")]
+    pub birth_min_couple_days: u64,
+    /// 新生儿与父母的初始亲密值。
+    #[serde(default = "d_parent_bond")]
+    pub parent_bond: f64,
+    /// 人口上限（0 = 不限）：多年代模拟的防爆护栏。
+    #[serde(default)]
+    pub max_population: usize,
+    // ---------- M5 二阶段：流行传播（新奇需求 + 行为模仿） ----------
+    /// 新奇需求增速：每重复一件熟悉的事积累一点"想换换花样"。
+    #[serde(default = "d_novelty_gain")]
+    pub novelty_gain: f64,
+    /// 新奇乘数：权重 × (1 + 此值 × 新奇需求 × 行为新颖度)。新颖度 = 1/(1+执行次数)。
+    #[serde(default = "d_novelty_mult")]
+    pub novelty_mult: f64,
+    /// 行为模仿强度：目睹亲近同伴完成某行为，自己该行为权重 × (1 + 此值 × 亲密)。
+    #[serde(default = "d_imitation_habit")]
+    pub imitation_habit: f64,
+    /// 行为观察半径（米）：完成行为时，这个距离内的亲近同伴算目睹者。
+    #[serde(default = "d_observe_radius")]
+    pub observe_radius: f64,
+    /// 习惯权重上限（相对基准的倍数，设计稿 3.4 权重归一化）：
+    /// 防止高频行为的权重无限增长把 softmax 压成单选。
+    #[serde(default = "d_habit_weight_cap")]
+    pub habit_weight_cap: f64,
 }
 
 fn d_room() -> f64 {
@@ -335,7 +396,7 @@ fn d_imitation_factor() -> f64 {
     0.7
 }
 fn d_imitation_min_bond() -> f64 {
-    0.25
+    0.35
 }
 fn d_startle_min_salience() -> f64 {
     0.6
@@ -418,6 +479,63 @@ fn d_goal_decay_mult() -> f64 {
 fn d_poverty_line() -> f64 {
     300.0
 }
+fn d_social_reach_radius() -> f64 {
+    30.0
+}
+fn d_freshness_halflife() -> f64 {
+    2.0
+}
+fn d_couple_bond() -> f64 {
+    0.85
+}
+fn d_couple_break_bond() -> f64 {
+    0.45
+}
+fn d_couple_form_prob() -> f64 {
+    0.08
+}
+fn d_couple_gain_mult() -> f64 {
+    1.6
+}
+fn d_childhood_days() -> u64 {
+    60
+}
+fn d_old_age_days() -> u64 {
+    240
+}
+fn d_child_plasticity() -> f64 {
+    1.8
+}
+fn d_elder_plasticity() -> f64 {
+    0.45
+}
+fn d_elder_nostalgia() -> f64 {
+    0.5
+}
+fn d_birth_prob() -> f64 {
+    0.03
+}
+fn d_birth_min_couple_days() -> u64 {
+    15
+}
+fn d_parent_bond() -> f64 {
+    0.8
+}
+fn d_novelty_gain() -> f64 {
+    0.05
+}
+fn d_novelty_mult() -> f64 {
+    1.4
+}
+fn d_imitation_habit() -> f64 {
+    0.15
+}
+fn d_observe_radius() -> f64 {
+    6.0
+}
+fn d_habit_weight_cap() -> f64 {
+    12.0
+}
 fn d_lighting() -> f64 {
     0.5
 }
@@ -429,6 +547,36 @@ fn d_victim_intensity() -> f64 {
 }
 fn d_victim_valence() -> f64 {
     -0.8
+}
+
+/// 行为变体（M5 二阶段，头脑风暴方案 B）："吃饭"带变体列表（吃什么）。
+/// 菜单挂在地点上（SpotDef.menu），价格与口味挂变体；softmax 与习惯
+/// 在变体级再走一次——"总点同一家外卖"可养成、目标可精确到"不吃泡面"。
+#[derive(Debug, Clone, Deserialize)]
+pub struct VariantDef {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 价格；None = 沿用所属行为的价格。
+    #[serde(default)]
+    pub cost: Option<f64>,
+    /// 对需求影响的微调（叠加在所属行为效果上，如更解馋的菜多回娱乐）。
+    #[serde(default)]
+    pub effects: BTreeMap<String, f64>,
+    /// 口味/特征标签（如 辣/甜）：日志与查看器呈现，目标与日记可引用。
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+impl VariantDef {
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.id)
+    }
+
+    /// 实际价格：变体未标价则沿用行为价。
+    pub fn price(&self, behavior_cost: f64) -> f64 {
+        self.cost.unwrap_or(behavior_cost)
+    }
 }
 
 /// 行为注册表条目：树只引用行为 ID，引擎解释声明执行。
@@ -474,6 +622,14 @@ pub struct BehaviorDef {
     /// 犯罪规格（M5 治安）：完成时按通用规则结算作案与被抓。
     #[serde(default)]
     pub crime: Option<CrimeSpec>,
+    /// 社交对象选择（M5 二阶段）：开始时在认识名单里按
+    /// 亲密 × 新鲜度 × 可及性 × 人物记忆 选一个对象（和谁）。
+    /// 带 remote_social 标签的不移动（电话）；否则寻人移动到对象身边。
+    #[serde(default)]
+    pub pick_target: bool,
+    /// 变体列表（M5 二阶段：吃什么）。带变体的行为，开始时再选一次变体。
+    #[serde(default)]
+    pub variants: Vec<VariantDef>,
 }
 
 impl BehaviorDef {
@@ -531,12 +687,18 @@ pub enum TreeNode {
         job: String,
         child: Box<TreeNode>,
     },
+    /// 伴侣门（M5 二阶段）：只有有恋人的代理放行子树——
+    /// 约会类行为只对恋爱中的人开放（状态机的树侧表达）。
+    MateGate {
+        child: Box<TreeNode>,
+    },
     Action {
         behavior: String,
     },
 }
 
-/// 地点：地图上的位置，带特征标签供记忆匹配。M2 起有坐标（米），M3 起归属区域。
+/// 地点：地图上的位置，带特征标签供记忆匹配。M2 起有坐标（米），M3 起归属区域，
+/// M5 二阶段起可挂菜单（这里能点到哪些变体——冰箱/货架/餐馆菜单 = 地点属性）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpotDef {
     pub id: String,
@@ -549,6 +711,10 @@ pub struct SpotDef {
     /// 所属区域（地点声誉的载体）；None = 不属于任何区域（如街道本身）。
     #[serde(default)]
     pub area: Option<String>,
+    /// 菜单（变体 ID 列表）：非空时，在此地点执行的带变体行为只能从中选。
+    /// 空 = 不限制（变体行为的全集都可用）。
+    #[serde(default)]
+    pub menu: Vec<String>,
 }
 
 /// 环境事件：按间隔随机发生，在发生位置的影响半径内写入目击代理的记忆。
@@ -625,13 +791,47 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
                 return Err(format!("行为 {} 引用了未知地点 {}", b.id, s));
             }
         }
+        // 变体（M5 二阶段）：效果键合法、价格非负、ID 全局唯一
+        //（菜单按裸 ID 引用，代理的变体权重表也以 ID 为键）。
+        for v in &b.variants {
+            for k in v.effects.keys() {
+                if !NEED_KEYS.contains(&k.as_str()) {
+                    return Err(format!("变体 {} 引用了未知需求 {}", v.id, k));
+                }
+            }
+            if let Some(c) = v.cost {
+                if c < 0.0 {
+                    return Err(format!("变体 {} 的价格不应为负", v.id));
+                }
+            }
+        }
+    }
+    let mut variant_ids: Vec<&str> = Vec::new();
+    for b in &cfg.behaviors {
+        for v in &b.variants {
+            if variant_ids.contains(&v.id.as_str()) {
+                return Err(format!("变体 ID {} 在多个行为间重复", v.id));
+            }
+            variant_ids.push(v.id.as_str());
+        }
+    }
+    // 菜单引用的变体必须存在。
+    for s in &cfg.spots {
+        for v in &s.menu {
+            if !variant_ids.contains(&v.as_str()) {
+                return Err(format!("地点 {} 的菜单引用了未定义的变体 {}", s.id, v));
+            }
+        }
     }
     // 职业（M5）：工作行为必须存在；岗位工资非负。
     let job_ids: Vec<&str> = cfg.jobs.iter().map(|j| j.id.as_str()).collect();
     let mut seen_work = std::collections::BTreeSet::new();
     for j in &cfg.jobs {
         if !behavior_ids.contains(&j.work_behavior.as_str()) {
-            return Err(format!("职业 {} 的工作行为 {} 未注册", j.id, j.work_behavior));
+            return Err(format!(
+                "职业 {} 的工作行为 {} 未注册",
+                j.id, j.work_behavior
+            ));
         }
         if seen_work.contains(&j.work_behavior) {
             return Err(format!("行为 {} 被多个职业用作工作行为", j.work_behavior));
@@ -661,14 +861,32 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
             return Err(format!("行为 {} 的价格不应为负", b.id));
         }
     }
-    validate_tree(&cfg.tree, &behavior_ids, &job_ids, &cfg.subtrees, &mut Vec::new())?;
+    validate_tree(
+        &cfg.tree,
+        &behavior_ids,
+        &job_ids,
+        &cfg.subtrees,
+        &mut Vec::new(),
+    )?;
     for (species, tree) in &cfg.trees {
-        validate_tree(tree, &behavior_ids, &job_ids, &cfg.subtrees, &mut Vec::new())
-            .map_err(|e| format!("物种 {species} 的树：{e}"))?;
+        validate_tree(
+            tree,
+            &behavior_ids,
+            &job_ids,
+            &cfg.subtrees,
+            &mut Vec::new(),
+        )
+        .map_err(|e| format!("物种 {species} 的树：{e}"))?;
     }
     for (name, tree) in &cfg.subtrees {
-        validate_tree(tree, &behavior_ids, &job_ids, &cfg.subtrees, &mut Vec::new())
-            .map_err(|e| format!("子树 {name}：{e}"))?;
+        validate_tree(
+            tree,
+            &behavior_ids,
+            &job_ids,
+            &cfg.subtrees,
+            &mut Vec::new(),
+        )
+        .map_err(|e| format!("子树 {name}：{e}"))?;
     }
     for s in &cfg.spots {
         if let Some(a) = &s.area {
@@ -755,6 +973,7 @@ fn validate_tree(
             }
             validate_tree(child, ids, job_ids, subtrees, visiting)
         }
+        TreeNode::MateGate { child } => validate_tree(child, ids, job_ids, subtrees, visiting),
         TreeNode::Subtree { tree_ref } => {
             if !subtrees.contains_key(tree_ref) {
                 return Err(format!("引用了未定义的子树 {tree_ref}"));
