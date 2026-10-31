@@ -23,8 +23,8 @@ pub fn derive_seed(world_seed: WorldSeed, agent: u32, purpose: u8) -> u64 {
     s
 }
 
-/// xoshiro256++ 生成器。
-#[derive(Clone, Debug)]
+/// xoshiro256++ 生成器。状态可序列化（存档需要保存每个生成器的进度）。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Rng {
     s: [u64; 4],
 }

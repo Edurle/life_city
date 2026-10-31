@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 pub const STREAM_DECISION: u8 = 0;
 pub const STREAM_INDIVIDUAL: u8 = 1;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Agent {
     pub id: u32,
     pub name: String,

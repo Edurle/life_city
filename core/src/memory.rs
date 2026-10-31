@@ -5,7 +5,7 @@ use crate::time::Tick;
 use std::collections::BTreeMap;
 
 /// 记忆条目。键 = (事件类型, 事件特征标签, 时段)，值 = 对行为标签的权重乘数。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryEntry {
     pub event: String,
     pub tags: Vec<String>,
@@ -18,7 +18,7 @@ pub struct MemoryEntry {
     pub tick: Tick,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MemoryTable {
     pub entries: Vec<MemoryEntry>,
     /// 事件类型的习惯化程度（0..0.9）：同一事件反复发生，新颖度下降。

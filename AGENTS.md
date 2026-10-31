@@ -16,8 +16,8 @@ city_life_simulator — 概率行为树驱动的第一人称生活模拟游戏�
 - 项目代码目录只放代码。
 
 ## 代码结构（M0 完成，M1 进行中）
-- `core/`（crate living-core）：`rng.rs` 确定性随机数、`time.rs` 时间、`needs.rs` 需求、`config.rs` 数据配置与校验、`tree.rs` 树可用性评估、`memory.rs` 记忆表、`agent.rs` 代理（含意志力与待执行指令）、`world.rs` 调度与决策核心（含指令成本模型与意志节点）、`log.rs` JSONL 日志。
-- `cli/`（crate living-cli）：`living-cli` 运行器与 `--bench` 基准；`living-play` 终端交互调试器（编号菜单指挥玩家的猫）。
-- `assets/cats.json`：M0 猫的行为/树/事件数据（含中文显示名，调参数值改这里，不改代码）。
-- `viewer/index.html`：日志回放查看器（意志力曲线、玩家指令行、拖入 JSONL 或 `?log=` 加载）。
-- 进度：M0 完成（《M0 开发记录》）；M1 完成意志系统与交互工具，剩 bincode 存档与验收跑数（《M1 开发记录》）。
+- `core/`（crate living-core）：`rng.rs` 确定性随机数、`time.rs` 时间、`needs.rs` 需求、`config.rs` 数据配置与校验、`tree.rs` 树可用性评估、`memory.rs` 记忆表、`agent.rs` 代理（含意志力与待执行指令）、`world.rs` 调度与决策核心（含指令成本模型与意志节点）、`log.rs` JSONL 日志、`save.rs` bincode 快照存档。
+- `cli/`（crate living-cli）：`living-cli` 批量运行（支持 `--save/--load`）与 `--bench` 基准；`living-play` 终端交互调试器（编号菜单指挥玩家的猫，实时事件反馈，退出自动存档可续玩）。
+- `assets/cats.json`：M0 猫的行为注册表/树/环境事件（含中文显示名，调参数值改这里，不改代码）。
+- `viewer/`：日志回放查看器（需求与意志力曲线、决策因素分解、玩家指令记录），静态网页零依赖。
+- 进度：M0、M1 完成（《M0/M1 开发记录》，测试 25 个全过）；下一步 M2 猫群（关系表、模仿节点、记忆泛化完整版）。

@@ -302,3 +302,105 @@ fn interrupting_costs_extra_willpower() {
     );
     assert!(out_idle.accepted);
 }
+
+// ---------- M1 收尾：存档与验收 ----------
+
+#[test]
+fn save_load_resumes_identically() {
+    let json = &test_config(true);
+    let mut a = World::new(load_config(json).unwrap(), 5, cat_names(2), true);
+    a.set_player(0);
+    a.run(900);
+    a.issue_command(0, "explore_room");
+    a.run(300);
+    let bytes = a.to_save();
+    let offset = a.logger.buf.len();
+    a.run(600);
+    // 读档继续的另一条时间线：从快照恢复后走完全相同的剩余路程。
+    let mut b = World::from_save(load_config(json).unwrap(), &bytes).unwrap();
+    b.run(600);
+    assert_eq!(
+        b.logger.buf, a.logger.buf[offset..],
+        "读档继续的日志应与连续运行完全一致（随机数状态必须存进快照）"
+    );
+}
+
+#[test]
+fn snapshot_rejects_version_mismatch() {
+    let cfg = load_config(&test_config(false)).unwrap();
+    let mut w = World::new(cfg.clone(), 1, cat_names(1), true);
+    w.run(10);
+    let mut bytes = w.to_save();
+    bytes[0] = 99; // 破坏版本号
+    assert!(World::from_save(cfg, &bytes).is_err());
+}
+
+/// M1 验收场景：它想睡，你让它做别的——量化的意志拉扯。
+/// 合心的指令 5 点起步；打断睡觉去做它最不想做的事，明显更贵且必须执行成功。
+#[test]
+fn m1_acceptance_sleepy_cat_story() {
+    let cfg = load_config(&test_config(false)).unwrap();
+    let mut w = World::new(cfg, 3, cat_names(1), true);
+    w.set_player(0);
+    // 等到猫睡着（睡大觉或窗台打盹；能量衰减到门槛后必然发生）。
+    let mut sleeping = false;
+    for _ in 0..2500 {
+        w.tick();
+        if let Some((bid, _, _)) = &w.agents[0].current {
+            if bid == "sleep" || bid == "nap_windowsill" {
+                sleeping = true;
+                break;
+            }
+        }
+    }
+    assert!(sleeping, "猫应该在两天内入睡（睡大觉或打盹）");
+
+    let status = w.behaviors_status(0);
+    let avail: Vec<_> = status.iter().filter(|s| s.available).cloned().collect();
+    assert!(!avail.is_empty());
+    let top = avail
+        .iter()
+        .min_by(|a, b| a.est_cost.total_cmp(&b.est_cost))
+        .unwrap()
+        .clone();
+    let against = avail
+        .iter()
+        .max_by(|a, b| a.est_cost.total_cmp(&b.est_cost))
+        .unwrap()
+        .clone();
+    let play = status.iter().find(|s| s.id == "play").cloned().unwrap();
+
+    // 它睡着时下令"去做它最不想做的事"。
+    let before = w.agents[0].willpower;
+    let out = w.issue_command(0, &against.id);
+    assert!(out.accepted, "{:?}", out.reason);
+    let premium = out.cost - against.est_cost;
+
+    println!(
+        "[M1 验收] 它睡着的时刻：合心『{}』≈{:.0} 点；玩球『{}』≈{:.0} 点；最逆『{}』≈{:.0} 点；打断睡去做最逆的事共 {:.0} 点（打断费 {:.0}）",
+        top.name, top.est_cost, play.name, play.est_cost, against.name, against.est_cost, out.cost, premium
+    );
+    println!(
+        "[M1 验收] 意志力 {:.0} → {:.0}，反应：{}",
+        before, w.agents[0].willpower, out.reason
+    );
+    assert!(
+        (7.0..=9.0).contains(&premium),
+        "打断加价应约为 8：{premium}"
+    );
+    assert!(
+        out.cost >= top.est_cost + 10.0,
+        "打断+逆着意愿应显著贵于合心指令：{} vs {:.0}",
+        out.cost,
+        top.est_cost
+    );
+    assert!(w.agents[0].willpower < before, "应扣除意志力");
+    // 下一拍真的去做了。
+    w.run(3);
+    assert_eq!(w.agents[0].current.as_ref().unwrap().0, against.id);
+    // 意志力耗尽则拒绝。
+    w.agents[0].willpower = 0.0;
+    let refused = w.issue_command(0, "explore_room");
+    assert!(!refused.accepted);
+    println!("[M1 验收] 意志力归零后：{}", refused.reason);
+}

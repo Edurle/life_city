@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 pub const NEED_KEYS: [&str; 6] = ["hunger", "energy", "fun", "social", "hygiene", "bladder"];
 pub const NEED_NAMES: [&str; 6] = ["饥饿", "精力", "娱乐", "社交", "卫生", "如厕"];
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, serde::Deserialize)]
 pub struct Needs {
     pub hunger: f64,
     pub energy: f64,

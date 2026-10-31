@@ -30,14 +30,25 @@ fn main() {
     let days: u64 = get("--days", "7").parse().expect("天数应为整数");
     let assets = get("--assets", "assets/cats.json");
     let out = get("--out", "");
+    let save_path = get("--save", "");
+    let load_path = get("--load", "");
 
     let json = std::fs::read_to_string(&assets)
         .unwrap_or_else(|e| panic!("读取配置失败 {assets}: {e}"));
     let cfg = load_config(&json).unwrap_or_else(|e| panic!("{e}"));
 
     let ticks = days * 1440;
-    let mut world = World::new(cfg, seed, cat_names(cats), true);
-    world.log_meta(seed, ticks);
+    let mut world = if load_path.is_empty() {
+        let mut w = World::new(cfg, seed, cat_names(cats), true);
+        w.log_meta(seed, ticks);
+        w
+    } else {
+        let bytes = std::fs::read(&load_path)
+            .unwrap_or_else(|e| panic!("读取存档失败 {load_path}: {e}"));
+        let w = World::from_save(cfg, &bytes).unwrap_or_else(|e| panic!("{e}"));
+        println!("已从存档 {load_path} 恢复：第 {} 天起继续 {} 天", w.tick / 1440 + 1, days);
+        w
+    };
     let t0 = Instant::now();
     world.run(ticks);
     let elapsed = t0.elapsed();
@@ -74,6 +85,16 @@ fn main() {
         for m in &s.top_memories {
             println!("        记忆: {m}");
         }
+    }
+
+    if !save_path.is_empty() {
+        let path = PathBuf::from(&save_path);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        std::fs::write(&path, world.to_save())
+            .unwrap_or_else(|e| panic!("写存档失败: {e}"));
+        println!("存档已写入 {}", path.display());
     }
 
     if !out.is_empty() {

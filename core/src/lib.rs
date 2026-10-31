@@ -11,6 +11,7 @@ pub mod log;
 pub mod memory;
 pub mod needs;
 pub mod rng;
+pub mod save;
 pub mod time;
 pub mod tree;
 pub mod world;

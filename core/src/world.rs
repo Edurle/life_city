@@ -53,11 +53,11 @@ pub struct World {
     pub tick: Tick,
     pub cfg: SimConfig,
     pub agents: Vec<Agent>,
-    behaviors: BTreeMap<String, BehaviorDef>,
-    spots: BTreeMap<String, SpotDef>,
+    pub(crate) behaviors: BTreeMap<String, BehaviorDef>,
+    pub(crate) spots: BTreeMap<String, SpotDef>,
     /// 环境事件的下一次发生拍（与 cfg.env_events 下标对应）。
-    event_schedule: Vec<Tick>,
-    world_rng: Rng,
+    pub(crate) event_schedule: Vec<Tick>,
+    pub(crate) world_rng: Rng,
     pub logger: Logger,
     /// 性能统计（基准模式用）。
     pub decisions_done: u64,

@@ -15,6 +15,14 @@ cargo test --workspace
 # 模拟 6 只猫 7 天，写日志并用命令行打印行为分布
 cargo run -p living-cli -- --seed 42 --cats 6 --days 7 --assets assets/cats.json --out logs/demo.jsonl
 
+# 中途存档 / 读档继续
+cargo run -p living-cli -- --seed 42 --cats 6 --days 3 --save logs/state.bin
+cargo run -p living-cli -- --load logs/state.bin --days 4 --out logs/demo2.jsonl
+
+# 交互调试器（玩家的猫：输数字指挥，实时反馈；退出自动存档，--load 续玩）
+cargo run -p living-cli --bin living-play -- --seed 42
+cargo run -p living-cli --bin living-play -- --load logs/play_state.bin
+
 # 性能校准（决策耗时、模拟一年耗时）
 cargo run -p living-cli --release -- --bench
 ```

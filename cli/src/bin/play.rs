@@ -24,17 +24,29 @@ fn main() {
     let seed: u64 = get("--seed", "42").parse().expect("种子应为整数");
     let cats: usize = get("--cats", "3").parse().expect("猫数应为整数");
     let assets = get("--assets", "assets/cats.json");
+    let load_path = get("--load", "");
+    let save_path = get("--save", "logs/play_state.bin");
 
     let json = std::fs::read_to_string(&assets)
         .unwrap_or_else(|e| panic!("读取配置失败 {assets}: {e}"));
     let cfg = load_config(&json).unwrap_or_else(|e| panic!("{e}"));
 
-    let mut world = World::new(cfg, seed, cat_names(cats), true);
-    world.set_player(0);
-    world.collect_recent = true;
-    world.log_meta(seed, 0);
-    // 先跑一段，让猫有自己的状态
-    world.run(600);
+    let mut world = if load_path.is_empty() {
+        let mut w = World::new(cfg, seed, cat_names(cats), true);
+        w.set_player(0);
+        w.collect_recent = true;
+        w.log_meta(seed, 0);
+        // 先跑一段，让猫有自己的状态
+        w.run(600);
+        w
+    } else {
+        let bytes = std::fs::read(&load_path)
+            .unwrap_or_else(|e| panic!("读取存档失败 {load_path}: {e}"));
+        let mut w = World::from_save(cfg, &bytes).unwrap_or_else(|e| panic!("{e}"));
+        w.collect_recent = true;
+        println!("（已从存档恢复，从第 {} 天继续）", world_day(&w));
+        w
+    };
 
     let player = world.agents[0].name.clone();
     println!("== 《活城》M1 · 玩家的猫 ==  你指挥 {player}，其余猫自己生活。");
@@ -87,7 +99,21 @@ fn main() {
         std::fs::create_dir_all(dir).ok();
     }
     world.logger.write_to_file(&path).ok();
-    println!("\n日志已写入 {}，可用 viewer/index.html 回放。", path.display());
+    let spath = std::path::PathBuf::from(&save_path);
+    if let Some(dir) = spath.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    std::fs::write(&spath, world.to_save()).ok();
+    println!(
+        "\n日志已写入 {}（查看器回放）；进度存档 {}（下次 --load {} 可继续）。",
+        path.display(),
+        spath.display(),
+        spath.display()
+    );
+}
+
+fn world_day(w: &World) -> u64 {
+    w.tick / 1440 + 1
 }
 
 fn bar(v: f64) -> String {
