@@ -5,7 +5,7 @@ use crate::needs::Needs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const LOG_VERSION: u32 = 6;
+pub const LOG_VERSION: u32 = 7;
 
 /// 决策的因素分解：系统能"报告原因"的载体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +242,20 @@ pub enum LogEvent {
         /// 变体（吃什么被种草）；行为级模仿为 None。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<String>,
+    },
+    /// 关卡开始（M6）。
+    ScenarioStart {
+        tick: u64,
+        scenario: String,
+        name: String,
+        days: u64,
+    },
+    /// 关卡结算（M6）：到期评估胜负，附每个条件的当时值。
+    ScenarioResult {
+        tick: u64,
+        scenario: String,
+        won: bool,
+        conditions: Vec<crate::scenario::ConditionState>,
     },
     Summary {
         agents: Vec<AgentSummary>,

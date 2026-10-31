@@ -32,6 +32,7 @@ fn main() {
     let assets = get("--assets", "assets/street.json");
     let load_path = get("--load", "");
     let save_path = get("--save", "logs/play_state.bin");
+    let scenario_path = get("--scenario", "");
 
     let json =
         std::fs::read_to_string(&assets).unwrap_or_else(|e| panic!("读取配置失败 {assets}: {e}"));
@@ -59,8 +60,23 @@ fn main() {
         w
     };
 
+    // M6：关卡开局。
+    if !scenario_path.is_empty() {
+        let text = std::fs::read_to_string(&scenario_path)
+            .unwrap_or_else(|e| panic!("读取关卡失败 {scenario_path}: {e}"));
+        let def = living_core::scenario::load_scenario(&text).unwrap_or_else(|e| panic!("{e}"));
+        world
+            .start_scenario(def.clone())
+            .unwrap_or_else(|e| panic!("{e}"));
+        println!(
+            "🎯 关卡开始：「{}」—— {}（{} 天）",
+            def.name, def.description, def.days
+        );
+    }
+    let mut last_autosave_day = world.tick / 1440;
+
     let player = world.agents[0].name.clone();
-    println!("== 《活城》M4 · 玩家的人生 ==  你扮演 {player}，一条街的其他居民自己生活。");
+    println!("== 《活城》M6 · 玩家的人生 ==  你扮演 {player}，一条街的其他居民自己生活。");
     println!("规则：指令永远可以下，但违背它意愿的指令要花更多意志力（⚡）；");
     println!("      已养成的习惯（∞）自动执行、指令免费；被恐惧压着的行为（⚠）更贵，");
     println!("      反复去做会慢慢好起来；定目标（🎯）对抗习惯，放弃会反弹。");
@@ -117,7 +133,47 @@ fn main() {
                 world.run(20);
                 report(&world, &player, before, "");
             }
+            Some(4) => {
+                print_story(&mut world, &player);
+            }
             _ => println!("没看懂，请输入菜单里的数字。"),
+        }
+        // M6：自动存档（每 3 模拟天一次，槽位 autosave）与关卡结算播报。
+        let day = world.tick / 1440;
+        if day >= last_autosave_day + 3 {
+            last_autosave_day = day;
+            let _ = world.save_to_slot(std::path::Path::new("saves"), "autosave");
+            println!(
+                "💾 已自动存档（第 {} 天，槽位 autosave，--load-slot autosave 续玩）",
+                day + 1
+            );
+        }
+        // 关卡结算播报（先把结算事件收集出来，再解开借用去打印故事）。
+        let settled: Vec<(String, bool)> = world.recent_events
+            [before.min(world.recent_events.len())..]
+            .iter()
+            .filter_map(|ev| match ev {
+                living_core::LogEvent::ScenarioResult { scenario, won, .. } => {
+                    Some((scenario.clone(), *won))
+                }
+                _ => None,
+            })
+            .collect();
+        for (scenario, won) in settled {
+            println!(
+                "\n🎯 关卡「{scenario}」{}！",
+                if won { "达成" } else { "未成" }
+            );
+            for c in world.scenario_progress() {
+                println!(
+                    "   {}：{:.2} / {} {}",
+                    c.label,
+                    c.current,
+                    c.target,
+                    if c.met { "✓" } else { "" }
+                );
+            }
+            print_story(&mut world, &player);
         }
     }
 
@@ -330,7 +386,7 @@ fn event_name(world: &World, id: &str) -> String {
 
 fn print_menu(status: &[BehaviorStatus]) {
     println!(
-        "  0 ⏩30分钟  9 ⏩4小时  5 📖日记  6 🔁习惯报告  7 💞密友  8 🎯目标  99 💾存日志退出"
+        "  0 ⏩30分钟  9 ⏩4小时  4 📜故事  5 📖日记  6 🔁习惯报告  7 💞密友  8 🎯目标  99 💾存日志退出"
     );
     for (i, s) in status.iter().enumerate() {
         if s.available {
@@ -388,6 +444,56 @@ fn print_habit_report(world: &World) {
             .map(|(id, w)| format!("{} ×{:.2}", behavior_name(world, id), w))
             .collect();
         println!("  🍜 口味：{}", parts.join(" · "));
+    }
+    println!();
+}
+
+/// 你的故事（M6）：玩家角色的经历回放——大事记按时间排成一段。
+fn print_story(world: &mut World, player: &str) {
+    let name_of = |id: u32| -> String {
+        world
+            .agents
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| format!("#{id}"))
+    };
+    let label = |bid: &str, vid: Option<&str>| -> String {
+        let b = world
+            .cfg
+            .behaviors
+            .iter()
+            .find(|x| x.id == bid)
+            .map(|x| x.display_name().to_string())
+            .unwrap_or_else(|| bid.to_string());
+        match vid {
+            Some(v) => format!(
+                "{b}·{}",
+                world
+                    .cfg
+                    .behaviors
+                    .iter()
+                    .flat_map(|x| x.variants.iter())
+                    .find(|x| x.id == v)
+                    .map(|x| x.display_name().to_string())
+                    .unwrap_or_else(|| v.to_string())
+            ),
+            None => b,
+        }
+    };
+    let all: Vec<living_core::LogEvent> = world
+        .logger
+        .buf
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let story = living_core::diary::player_story(&all, 0, name_of, &label);
+    println!("\n📜 {player} 的故事");
+    if story.is_empty() {
+        println!("  （还没有值得写下来的大事）");
+    }
+    for l in &story {
+        println!("  {l}");
     }
     println!();
 }

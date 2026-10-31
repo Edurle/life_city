@@ -1,5 +1,7 @@
-# 《活城》M3 表现竖切：一条街的最小客户端。
+# 《活城》客户端（M3 竖切 + M6 旁观模式）。
 # 区域矩形按声誉着色、MultiMesh 批量渲染代理、速度档按钮、时钟与事件播报。
+# 旁观模式：点击任意代理查看——公开信息人人可见；需求与内心只有
+# 自己或密友可见（门在核心侧 inspect_friend，客户端不越权）。
 # 模拟全部住在 Rust 核心（SimNode），本脚本只读快照——"核心不认识界面"。
 extends Node2D
 
@@ -18,6 +20,14 @@ var screenshot_after := -1.0   # > 0 时：到点截图并退出（调试用 --s
 var agent_count := 0
 var species_bytes := PackedByteArray()
 var configured := false
+# 旁观模式（M6）
+var selected := -1            # 点选的代理下标；-1 = 无
+var camera: Camera2D
+var inspect_panel: PanelContainer
+var inspect_title: Label
+var inspect_body: RichTextLabel
+var follow_btn: Button
+var follow := false
 
 func _ready() -> void:
 	# 模拟节点：GDExtension 注册的原生类。
@@ -33,11 +43,19 @@ func _ready() -> void:
 	sim.start(42, cfg_path, 8, 4)
 	agent_count = sim.agent_positions().size()
 	species_bytes = sim.agent_species()
+	_build_camera()
 	_build_areas()
 	_build_agents()
 	_build_ui()
 	configured = true
 	print("[slice] 启动：%d 名居民，配置 %s，截图模式 %s，用户参数 %s" % [agent_count, cfg_path, screenshot_after, OS.get_cmdline_user_args()])
+
+func _build_camera() -> void:
+	camera = Camera2D.new()
+	camera.position = Vector2(MAP_W * SCALE / 2, MAP_H * SCALE / 2)
+	camera.zoom = Vector2(1.0, 1.0)
+	add_child(camera)
+	camera.make_current()
 
 func _build_areas() -> void:
 	var rects: PackedFloat32Array = sim.area_rects()
@@ -93,10 +111,66 @@ func _build_ui() -> void:
 		hbox.add_child(btn)
 	feed_label = RichTextLabel.new()
 	feed_label.position = Vector2(12, 660)
-	feed_label.size = Vector2(1000, 56)
+	feed_label.size = Vector2(760, 56)
 	feed_label.add_theme_font_size_override("normal_font_size", 14)
 	canvas.add_child(feed_label)
+	# 旁观检查面板（M6）：点选代理后显示。
+	inspect_panel = PanelContainer.new()
+	inspect_panel.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
+	inspect_panel.position = Vector2(940, 60)
+	inspect_panel.size = Vector2(320, 560)
+	var vb := VBoxContainer.new()
+	inspect_title = Label.new()
+	inspect_title.add_theme_font_size_override("font_size", 18)
+	inspect_title.text = "点击一位居民看看"
+	vb.add_child(inspect_title)
+	follow_btn = Button.new()
+	follow_btn.text = "跟随镜头：关"
+	follow_btn.pressed.connect(_toggle_follow)
+	vb.add_child(follow_btn)
+	inspect_body = RichTextLabel.new()
+	inspect_body.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	inspect_body.add_theme_font_size_override("normal_font_size", 15)
+	inspect_body.append_text("（旁观模式：任何人都能看到 [b]表面[/b]——在做什么、在哪里。\n需求与内心只有 [b]自己或密友[/b] 能看到。）")
+	vb.add_child(inspect_body)
+	inspect_panel.add_child(vb)
+	canvas.add_child(inspect_panel)
 	sim.set_speed_mult(100.0 if screenshot_after > 0.0 else 1.0)
+
+func _unhandled_input(event: InputEvent) -> void:
+	if not configured:
+		return
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		var world := get_global_mouse_position()
+		var positions: PackedVector2Array = sim.agent_positions()
+		var best := -1
+		var best_d := 400.0   # 点击容差（像素平方）
+		for i in positions.size():
+			var p := Vector2(positions[i].x * SCALE, (MAP_H - positions[i].y) * SCALE)
+			var d: float = p.distance_squared_to(world)
+			if d < best_d:
+				best_d = d
+				best = i
+		if best >= 0:
+			selected = best
+			_refresh_inspect()
+
+func _toggle_follow() -> void:
+	follow = not follow
+	follow_btn.text = "跟随镜头：开" if follow else "跟随镜头：关"
+
+func _refresh_inspect() -> void:
+	if selected < 0:
+		return
+	var brief: PackedStringArray = sim.agent_brief(selected)
+	if brief.size() < 5:
+		return
+	inspect_title.text = "%s（%s · %s）" % [brief[0], brief[1], brief[2]]
+	inspect_body.clear()
+	inspect_body.append_text("正在：%s\n地点：%s\n" % [brief[3], brief[4]])
+	var deep: PackedStringArray = sim.agent_deep(selected)
+	for line in deep:
+		inspect_body.append_text(line + "\n")
 
 func _process(delta: float) -> void:
 	if not configured:
@@ -125,12 +199,19 @@ func _process(delta: float) -> void:
 			(area_rects_nodes[i] as ColorRect).color = Color(
 				0.75 - 0.55 * rep, 0.25 + 0.5 * rep, 0.3, 0.35 + 0.25 * clean)
 			(area_labels[i] as Label).text = "%s  声誉 %.0f%%" % [sim.area_names()[i], rep * 100]
+		_refresh_inspect()
 		var feed: PackedStringArray = sim.drain_recent_events()
 		if feed.size() > 0:
 			var lines := []
 			for line in feed:
 				lines.push_back(line)
 			feed_label.append_text("\n".join(lines) + "\n")
+	# 跟随镜头（M6 旁观）：平滑贴向选中代理。
+	if follow and selected >= 0:
+		var follow_pos: PackedVector2Array = sim.agent_positions()
+		if selected < follow_pos.size():
+			var target := Vector2(follow_pos[selected].x * SCALE, (MAP_H - follow_pos[selected].y) * SCALE)
+			camera.position = camera.position.lerp(target, minf(delta * 4.0, 1.0))
 
 func _capture_and_quit() -> void:
 	# 调试：把视口存成 PNG 后退出（自动化可视验证用；需要真渲染，不能 headless）。

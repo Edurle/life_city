@@ -34,12 +34,27 @@ cargo run -p living-cli --release -- --bench
 
 浏览器打开 `viewer/index.html`，拖入 `logs/*.jsonl`：时间轴回放、需求曲线、权重变化、记忆表（含目睹所学）、猫群动态（事件/惊吓/亲密变化）、亲近关系、地点声誉曲线、决策因素分解（含安全感）。
 
-## Godot 客户端（M3 表现竖切）
+## 目标关卡与你的故事（M6）
+
+```bash
+# 一年小镇 + 关卡 + 你的故事 + 槽位存档
+cargo run -p living-cli -- --assets assets/town.json --seed 42 --humans 14 --cats 3 \
+  --days 365 --scenario assets/scenarios/love_and_jobs.json --save-slot demo
+cargo run -p living-cli -- --assets assets/town.json --load-slot demo --days 30   # 续玩
+
+# 交互玩关卡（含进度/结算/自动存档）
+cargo run -p living-cli --bin living-play -- --assets assets/town.json \
+  --humans 6 --cats 2 --scenario assets/scenarios/park_revival.json
+```
+
+## Godot 客户端（M3 竖切 + M6 旁观模式）
 
 ```bash
 scripts/build_godot.sh                      # 编译适配层并复制到 godot/bin/
 ~/app/Godot_v4.7.2-stable_linux.x86_64 --path godot   # 打开街道视图
 #   窗口内：⏸/×1/×2/×10/×100 速度档，区域按声誉着色，代理实时移动
+#   旁观模式：点击任意代理看表面（在做什么/在哪里）；需求与内心只有
+#   自己或密友可见（门在核心侧）；"跟随镜头"跟踪选中代理
 # 自动截图（可视验证）：-- --screenshot-after=6
 ```
 

@@ -126,6 +126,11 @@ impl Relations {
 
     // ---------- M5 二阶段：恋人关系 ----------
     /// 某代理的恋人（无 = 单身）。
+    /// 镇上现存恋爱对数（关卡求值与摘要用）。
+    pub fn couple_count(&self) -> usize {
+        self.couples.len()
+    }
+
     pub fn couple_of(&self, a: u32) -> Option<u32> {
         if let Some(&(b, _)) = self.couples.get(&a) {
             return Some(b);

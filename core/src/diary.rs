@@ -402,8 +402,202 @@ fn ev_tick(ev: &LogEvent) -> Option<u64> {
         | SocialPick { tick, .. }
         | Couple { tick, .. }
         | Born { tick, .. }
-        | Imitate { tick, .. } => *tick,
+        | Imitate { tick, .. }
+        | ScenarioStart { tick, .. }
+        | ScenarioResult { tick, .. } => *tick,
     })
+}
+
+
+/// 你的故事（M6）：玩家角色的经历回放——只挑"值得讲述"的大事，
+/// 按时间排成一段可读的经历。M6 验收要求"新玩家能主动讲述一个发生在
+/// 自己角色身上的非预期趣事"，这个函数就是把故事递到玩家手里。
+/// 挑选规则：案发（受害/作案/被捕）、职业变动、恋爱成对与分手、
+/// 孩子出生、被吓到、目睹所学（挑最强烈的几条）、恐惧消退、
+/// 目标设立与结局、关卡结算。
+pub fn player_story(
+    events: &[LogEvent],
+    player: u32,
+    name_of: impl Fn(u32) -> String,
+    label: &LabelFn,
+) -> Vec<String> {
+    let mut lines: Vec<(u64, String)> = Vec::new();
+    // 目睹所学只讲最强烈的几条（其余太碎）。
+    let mut witnessed: Vec<(u64, f64, String)> = Vec::new();
+    for ev in events {
+        match ev {
+            LogEvent::Theft {
+                tick,
+                thief,
+                victim,
+                amount,
+                caught,
+                area,
+            } => {
+                if *thief == player {
+                    let area_name = area_label(area);
+                    if *caught {
+                        lines.push((
+                            *tick,
+                            format!(
+                                "在{}行窃{}元时被当场抓住，东西都还了回去",
+                                area_name,
+                                amount.round()
+                            ),
+                        ));
+                    } else {
+                        lines.push((
+                            *tick,
+                            format!(
+                                "在{}顺走了{}的钱包（{}元）",
+                                area_name,
+                                name_of(*victim),
+                                amount.round()
+                            ),
+                        ));
+                    }
+                } else if *victim == player {
+                    lines.push((
+                        *tick,
+                        format!(
+                            "在{}被{}偷走了{}元{}",
+                            area_label(area),
+                            name_of(*thief),
+                            amount.round(),
+                            if *caught { "（已被追回）" } else { "" }
+                        ),
+                    ));
+                }
+            }
+            LogEvent::JobChange {
+                tick,
+                agent,
+                from,
+                to,
+                reason,
+            } if *agent == player => {
+                let f = from.as_deref().unwrap_or("无业");
+                match to.as_deref() {
+                    Some(t) => {
+                        lines.push((*tick, format!("从「{}」转行做了「{}」（{}）", f, t, reason)))
+                    }
+                    None => lines.push((*tick, format!("不再做「{}」了（{}）", f, reason))),
+                }
+            }
+            LogEvent::Couple {
+                tick,
+                a,
+                b,
+                started,
+            } if *a == player || *b == player => {
+                let other = if *a == player { *b } else { *a };
+                if *started {
+                    lines.push((*tick, format!("和{}在一起了", name_of(other))));
+                } else {
+                    lines.push((*tick, format!("和{}分开了", name_of(other))));
+                }
+            }
+            LogEvent::Born {
+                tick,
+                mother,
+                father,
+                ..
+            } if *mother == player || *father == player => {
+                lines.push((*tick, "家里添了个孩子".to_string()));
+            }
+            LogEvent::Startled { tick, agent, event } if *agent == player => {
+                lines.push((*tick, format!("被「{}」吓得不轻", event)));
+            }
+            LogEvent::MemoryWrite {
+                tick,
+                agent,
+                event,
+                salience,
+                vicarious: true,
+                ..
+            } if *agent == player => {
+                witnessed.push((*tick, *salience, event.clone()));
+            }
+            LogEvent::Exposure {
+                tick,
+                agent,
+                behavior,
+                faded,
+            } if *agent == player => {
+                lines.push((
+                    *tick,
+                    format!(
+                        "对「{}」的恐惧淡了一些（当面见了一次，消退 {:.0}%）",
+                        label(behavior, None),
+                        faded * 100.0
+                    ),
+                ));
+            }
+            LogEvent::GoalSet {
+                tick,
+                agent,
+                behavior,
+                ..
+            } if *agent == player => {
+                lines.push((
+                    *tick,
+                    format!("给自己定了个目标：少做「{}」", label(behavior, None)),
+                ));
+            }
+            LogEvent::GoalEnd {
+                tick,
+                agent,
+                behavior,
+                success,
+                abandoned,
+                violations,
+                ..
+            } if *agent == player => {
+                let verdict = if *abandoned {
+                    "中途放弃了（习惯慢慢回来了）".to_string()
+                } else if *success {
+                    "成了".to_string()
+                } else {
+                    format!("没忍住 {} 次", violations)
+                };
+                lines.push((
+                    *tick,
+                    format!("「{}」的目标{}", label(behavior, None), verdict),
+                ));
+            }
+            LogEvent::ScenarioResult {
+                tick,
+                scenario,
+                won,
+                ..
+            } => {
+                lines.push((
+                    *tick,
+                    format!(
+                        "关卡「{}」{}——这段故事告一段落",
+                        scenario,
+                        if *won { "达成" } else { "未成" }
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
+    // 目睹所学：最强烈的 3 条，按时间排。
+    witnessed.sort_by(|a, b| b.1.total_cmp(&a.1));
+    for (tick, _, event) in witnessed.into_iter().take(3) {
+        lines.push((tick, format!("目睹了别人的遭遇，把「{}」记在了心里", event)));
+    }
+    lines.sort_by_key(|(t, _)| *t);
+    lines
+        .into_iter()
+        .map(|(t, s)| format!("{} {}", format_clock(t), s))
+        .collect()
+}
+
+/// 区域显示名（日志里只有 ID；直接显示 ID 即可，配置中文名在表现层映射）。
+fn area_label(area: &str) -> String {
+    area.to_string()
 }
 
 #[cfg(test)]

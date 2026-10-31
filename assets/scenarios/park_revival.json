@@ -1,0 +1,14 @@
+{
+  "id": "park_revival",
+  "name": "公园复苏",
+  "description": "醉汉接二连三在公园滋事，街坊晚上都不去了。30 天内让公园口碑回到 0.7。",
+  "days": 30,
+  "win": [
+    { "kind": "area_reputation", "area": "park", "min": 0.7 }
+  ],
+  "inject_events": [
+    { "day": 0, "event_index": 0 },
+    { "day": 1, "event_index": 0 },
+    { "day": 2, "event_index": 0 }
+  ]
+}

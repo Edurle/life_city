@@ -1,0 +1,12 @@
+{
+  "id": "love_and_jobs",
+  "name": "人间烟火",
+  "description": "三个月：这条街上要有人谈成恋爱，有人换了工作（概率自己选的），而你得交到一个 0.6 的朋友。",
+  "days": 90,
+  "win": [
+    { "kind": "couple_any" },
+    { "kind": "job_change", "min": 1 },
+    { "kind": "bond", "min": 0.6 }
+  ],
+  "inject_events": []
+}

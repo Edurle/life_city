@@ -1760,7 +1760,7 @@ fn town_job_assignment_and_economy_flow() {
         .iter()
         .filter(|a| a.species == "human" && a.job.is_some())
         .count();
-    assert_eq!(employed, 21, "21 个岗位给 21 人（小偷不指派，5 人待业）");
+    assert_eq!(employed, 23, "23 个岗位给 23 人（小偷不指派，3 人待业）");
     // 跑五天：工作者挣到钱（钱包高于初始），且镇上有消费发生。
     let start: Vec<f64> = w.agents.iter().map(|a| a.wallet).collect();
     w.run(5 * 1440);
@@ -2661,5 +2661,187 @@ fn save_load_m5_2_roundtrip() {
         b.logger.buf,
         a.logger.buf[offset..],
         "读档继续的日志应与连续运行完全一致"
+    );
+}
+
+// ---------- M6：目标关卡、你的故事、存档槽 ----------
+
+/// M6 验收链：目标关卡的进度查询、开局事件注入、到期结算与日志。
+#[test]
+fn scenario_start_progress_settle() {
+    // 关卡断言要看日志，这里开日志建世界（m3_world 为省内存默认关）。
+    let cfg = load_config(&m3_config()).unwrap();
+    let roster: Vec<(String, String)> = living_core::human_names(6)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    let mut w = World::new(cfg, 11, roster, true);
+    w.set_player(0);
+    let def = living_core::scenario::load_scenario(
+        r#"{"id":"t","name":"测试","description":"","days":2,
+            "win":[{"kind":"area_reputation","area":"park","min":0.5}],
+            "inject_events":[{"day":0,"event_index":0}]}"#,
+    )
+    .unwrap();
+    w.start_scenario(def).unwrap();
+    // 进度可查：声誉条件当前值 = 公园初始声誉。
+    let prog = w.scenario_progress();
+    assert_eq!(prog.len(), 1);
+    assert!((prog[0].current - 1.0).abs() < 1e-9, "开局公园满声誉");
+    // 跑两天：第 0 天注入一次滋事事件（写日志），到期结算。
+    w.run(2 * 1440);
+    assert!(
+        w.logger.buf.contains("\"t\":\"scenario_result\""),
+        "应有关卡结算日志"
+    );
+    let active = w.scenario.as_ref().unwrap();
+    assert!(active.finished.is_some(), "到期后应已结算");
+    assert!(
+        w.logger.buf.contains("\"t\":\"env_event\"") || w.logger.buf.contains("park_rowdy"),
+        "开局注入的事件应已触发"
+    );
+    // 已结算后进度仍可查，且不再重复结算。
+    let tick_now = w.tick;
+    w.run(1440);
+    let results = w.logger.buf.matches("\"t\":\"scenario_result\"").count();
+    assert_eq!(results, 1, "结算只发生一次");
+    assert!(w.tick >= tick_now + 1440);
+}
+
+/// 胜利路径：条件天然满足时到期判胜。
+#[test]
+fn scenario_wins_when_conditions_met() {
+    let mut w = m3_world(5, 2);
+    w.start_scenario(
+        living_core::scenario::load_scenario(
+            r#"{"id":"easy","name":"白送","description":"","days":1,
+            "win":[{"kind":"wallet","min":0.0}]}"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    w.run(1440);
+    assert!(
+        w.scenario.as_ref().unwrap().finished == Some(true),
+        "钱包≥0 应判胜"
+    );
+}
+
+/// 你的故事：从日志事件里挑出值得讲述的大事（M6 验收的载体）。
+#[test]
+fn player_story_collects_notables() {
+    use living_core::LogEvent;
+    let events = vec![
+        LogEvent::Couple {
+            tick: 600,
+            a: 0,
+            b: 3,
+            started: true,
+        },
+        LogEvent::Theft {
+            tick: 1200,
+            thief: 2,
+            victim: 0,
+            amount: 70.0,
+            caught: false,
+            area: "park".into(),
+        },
+        LogEvent::JobChange {
+            tick: 2000,
+            agent: 0,
+            from: Some("baker".into()),
+            to: Some("courier".into()),
+            reason: "迫于生计".into(),
+        },
+        LogEvent::Born {
+            tick: 3000,
+            agent: 9,
+            mother: 0,
+            father: 3,
+        },
+        LogEvent::Startled {
+            tick: 3400,
+            agent: 0,
+            event: "park_rowdy".into(),
+        },
+        LogEvent::MemoryWrite {
+            tick: 3500,
+            agent: 0,
+            event: "目睹:park_rowdy".into(),
+            salience: 0.6,
+            mults: Default::default(),
+            source: Some(2),
+            vicarious: true,
+        },
+    ];
+    let name_of = |id: u32| -> String { format!("#{id}") };
+    let label = |b: &str, _: Option<&str>| -> String { b.to_string() };
+    let story = living_core::diary::player_story(&events, 0, name_of, &label);
+    let joined = story.join("\n");
+    assert!(joined.contains("在一起了"), "应讲述恋爱：{joined}");
+    assert!(joined.contains("被#2偷走"), "应讲述被偷：{joined}");
+    assert!(joined.contains("转行"), "应讲述转行：{joined}");
+    assert!(joined.contains("孩子"), "应讲述孩子出生：{joined}");
+    assert!(joined.contains("吓得不轻"), "应讲述被吓：{joined}");
+    assert!(joined.contains("目睹"), "应讲述目睹所学：{joined}");
+    // 按时间排序：第一行是恋爱（tick 600）。
+    assert!(story[0].contains("在一起了"), "故事按时间排序");
+}
+
+/// 存档槽：写入 → 列表元信息 → 读档续跑一致。
+#[test]
+fn save_slots_roundtrip_and_meta() {
+    let dir = std::env::temp_dir().join(format!("living_slots_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let json = m3_config();
+    let mut a = World::new(
+        load_config(&json).unwrap(),
+        5,
+        cat_roster(cat_names(2)),
+        true,
+    );
+    a.set_player(0);
+    a.run(900);
+    a.start_scenario(
+        living_core::scenario::load_scenario(
+            r#"{"id":"s","name":"槽位关卡","description":"","days":5,"win":[{"kind":"wallet","min":0.0}]}"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    a.save_to_slot(&dir, "slot-1").unwrap();
+
+    // 元信息列表。
+    let slots = World::list_slots(&dir);
+    assert_eq!(slots.len(), 1);
+    assert_eq!(slots[0].0, "slot-1");
+    assert_eq!(slots[0].1.agents, 2);
+    assert_eq!(slots[0].1.scenario.as_ref().unwrap().1, "槽位关卡");
+
+    // 读档续跑 = 连续运行。
+    let mut b = World::load_from_slot(load_config(&json).unwrap(), &dir, "slot-1").unwrap();
+    let offset = a.logger.buf.len();
+    a.run(300);
+    b.run(300);
+    assert_eq!(
+        b.logger.buf,
+        a.logger.buf[offset..],
+        "槽位读档续跑应与连续运行一致"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 盗窃调平回归（M6 内容调参，M5 观察项）：年盗窃量低于调参前的 435。
+#[test]
+fn theft_rate_tuned_down() {
+    let mut w = town_world(5, 26);
+    w.logger.enabled = false;
+    w.run(365 * 1440);
+    let st = &w.stats;
+    println!("[M6 调平] 一年盗窃 {} 起（原 M5 记录 435）", st.thefts);
+    assert!(
+        st.thefts < 400,
+        "调参后年盗窃应低于 400（目标继续逼近 <200，靠后续内容量）：{}",
+        st.thefts
     );
 }

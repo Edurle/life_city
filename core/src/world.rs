@@ -73,7 +73,7 @@ pub struct ChoiceInfo {
 
 /// 小镇年度统计（M5）：模拟器内累计的轻量计数，统计回归测试与
 /// CLI 年度摘要用——不必为了几个数字解析几十万行日志。
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TownStats {
     pub thefts: u64,
     pub thefts_caught: u64,
@@ -176,6 +176,8 @@ pub struct World {
     pub recent_events: Vec<LogEvent>,
     /// 年度统计（M5）。
     pub stats: TownStats,
+    /// 运行中的目标关卡（M6）。
+    pub scenario: Option<crate::scenario::ActiveScenario>,
 }
 
 impl World {
@@ -283,6 +285,7 @@ impl World {
             collect_recent: false,
             recent_events: Vec::new(),
             stats: TownStats::default(),
+            scenario: None,
         }
     }
 
@@ -535,6 +538,173 @@ impl World {
         }
     }
 
+    // ---------- M6：目标关卡 ----------
+
+    /// 开始关卡：校验引用，记录基线（"关卡期间"的计数从这里起算）。
+    pub fn start_scenario(&mut self, def: crate::scenario::ScenarioDef) -> Result<(), String> {
+        crate::scenario::check_against_config(&def, &self.cfg)?;
+        let player_exec_baseline = self
+            .agents
+            .iter()
+            .find(|a| a.is_player)
+            .map(|a| a.exec_counts.clone())
+            .unwrap_or_default();
+        let mut town_exec_baseline: BTreeMap<String, u64> = BTreeMap::new();
+        for a in &self.agents {
+            for (k, v) in &a.exec_counts {
+                *town_exec_baseline.entry(k.clone()).or_insert(0) += v;
+            }
+        }
+        let name = def.name.clone();
+        let days = def.days;
+        self.scenario = Some(crate::scenario::ActiveScenario {
+            def_json: serde_json::to_string(&def).expect("关卡序列化"),
+            started_tick: self.tick,
+            job_changes_baseline: self.stats.job_changes,
+            player_exec_baseline,
+            town_exec_baseline,
+            injected: vec![],
+            finished: None,
+        });
+        self.logger.log(&LogEvent::ScenarioStart {
+            tick: self.tick,
+            scenario: def.id.clone(),
+            name,
+            days,
+        });
+        // 第 0 天的注入立即触发（日界只能碰到第 1 天起）。
+        let day0: Vec<usize> = def
+            .inject_events
+            .iter()
+            .enumerate()
+            .filter(|(_, inj)| inj.day == 0)
+            .map(|(i, _)| i)
+            .collect();
+        for idx in day0 {
+            self.fire_injection(idx);
+        }
+        Ok(())
+    }
+
+    /// 触发一次注入事件（位置：显式坐标或区域中心）。
+    fn fire_injection(&mut self, inj_idx_in_def: usize) {
+        let (Some(active), def) = (self.scenario.clone(), self.scenario.as_ref().unwrap().def())
+        else {
+            return;
+        };
+        let Some(inj) = def.inject_events.get(inj_idx_in_def) else {
+            return;
+        };
+        let pos = inj.pos.unwrap_or_else(|| {
+            self.cfg
+                .env_events
+                .get(inj.event_index)
+                .and_then(|e| e.area.as_deref())
+                .and_then(|aid| self.cfg.areas.iter().find(|a| a.id == aid))
+                .map(|a| (a.x + a.w / 2.0, a.y + a.h / 2.0))
+                .unwrap_or((
+                    self.cfg.params.map_width / 2.0,
+                    self.cfg.params.map_height / 2.0,
+                ))
+        });
+        self.trigger_env_event(inj.event_index, pos);
+        if let Some(a) = self.scenario.as_mut() {
+            a.injected.push(inj_idx_in_def);
+        }
+        let _ = active; // 避免未用警告（active 仅用于借用拆分）
+    }
+
+    /// 关卡进度（每个条件的当前值与是否达成）；无关卡返回空。
+    pub fn scenario_progress(&self) -> Vec<crate::scenario::ConditionState> {
+        let Some(active) = &self.scenario else {
+            return vec![];
+        };
+        let def = active.def();
+        self.with_scenario_view(|v| def.win.iter().map(|c| c.evaluate(v)).collect())
+    }
+
+    /// 放弃关卡（不写结算——玩家主动退出不算输赢）。
+    pub fn abort_scenario(&mut self) {
+        self.scenario = None;
+    }
+
+    /// 关卡求值视图（with 风格：闭包借用 self，不能跨越生命周期返回）。
+    fn with_scenario_view<R>(&self, f: impl FnOnce(&crate::scenario::ScenarioView) -> R) -> R {
+        let player = self.agents.iter().find(|a| a.is_player);
+        let player_bond_max = player.map(|a| self.relations.max_bond(a.id)).unwrap_or(0.0);
+        let job_changes = self
+            .scenario
+            .as_ref()
+            .map(|s| self.stats.job_changes - s.job_changes_baseline)
+            .unwrap_or(0);
+        let rep = |area: &str| self.area_states.get(area).map(|s| s.reputation);
+        let count = |behavior: &str, who: &str| -> u64 {
+            let Some(active) = self.scenario.as_ref() else {
+                return 0;
+            };
+            let baseline = if who == "player" {
+                active
+                    .player_exec_baseline
+                    .get(behavior)
+                    .copied()
+                    .unwrap_or(0)
+            } else {
+                active
+                    .town_exec_baseline
+                    .get(behavior)
+                    .copied()
+                    .unwrap_or(0)
+            };
+            let current = if who == "player" {
+                self.agents
+                    .iter()
+                    .find(|a| a.is_player)
+                    .and_then(|a| a.exec_counts.get(behavior).copied())
+                    .unwrap_or(0)
+            } else {
+                self.agents
+                    .iter()
+                    .map(|a| a.exec_counts.get(behavior).copied().unwrap_or(0))
+                    .sum()
+            };
+            current.saturating_sub(baseline)
+        };
+        let v = crate::scenario::ScenarioView {
+            tick: self.tick,
+            player,
+            player_bond_max,
+            any_couple: self.relations.couple_count() > 0,
+            job_changes,
+            area_reputation: &rep,
+            behavior_count: &count,
+        };
+        f(&v)
+    }
+
+    /// 日界：注入开局事件 + 到期结算（由 tick 的日界块调用）。
+    fn scenario_daily(&mut self, tick: Tick, events: &mut Vec<LogEvent>) {
+        let Some(active) = self.scenario.clone() else {
+            return;
+        };
+        let def = active.def();
+        let day = crate::time::day_of(tick - active.started_tick);
+        // 到期日的强制注入（叙事钩子；第 0 天已在 start_scenario 触发）。
+        for (idx, inj) in def.inject_events.iter().enumerate() {
+            if inj.day == day && !active.injected.contains(&idx) {
+                self.fire_injection(idx);
+            }
+        }
+        // 到期结算。
+        let mut active = self.scenario.clone().unwrap();
+        let settled = self.with_scenario_view(|v| crate::scenario::scenario_daily(v, &mut active));
+        if let Some(ev) = settled {
+            if let Some(a) = self.scenario.as_mut() {
+                *a = active;
+            }
+            events.push(ev);
+        }
+    }
+
     /// 模拟开始前写日志头（只含确定性字段，保证日志字节级可比较）。
     pub fn log_meta(&mut self, seed: u64, total_ticks: Tick) {
         self.logger.log(&LogEvent::Meta {
@@ -610,6 +780,8 @@ impl World {
             self.settle_background_day(&mut events);
             // M5 职业流动：无业或经济压力大者每天评估一次（概率驱动，无剧本）。
             self.job_market_daily(tick, &mut events);
+            // M6 目标关卡：开局事件注入 + 到期结算。
+            self.scenario_daily(tick, &mut events);
         }
 
         // 需求衰减（每拍 = 每模拟分钟）。T2 背景代理跳过逐拍衰减，

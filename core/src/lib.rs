@@ -19,6 +19,7 @@ pub mod news;
 pub mod relation;
 pub mod rng;
 pub mod save;
+pub mod scenario;
 pub mod space;
 pub mod time;
 pub mod tree;

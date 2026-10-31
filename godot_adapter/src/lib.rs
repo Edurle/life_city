@@ -230,6 +230,126 @@ impl SimNode {
         out
     }
 
+    /// 玩家角色编号（旁观模式的"自己"参照）。
+    #[func]
+    fn player_index(&self) -> i64 {
+        self.sim
+            .as_ref()
+            .and_then(|s| s.agents.iter().position(|a| a.is_player))
+            .map(|i| i as i64)
+            .unwrap_or(-1)
+    }
+
+    /// 代理的公开信息（旁观点选）：名字/物种/职业/正在做什么/所在区域。
+    /// 心理状态默认不可见（设计稿 6.x 信息分层）。
+    #[func]
+    fn agent_brief(&self, idx: i64) -> PackedStringArray {
+        let mut out = PackedStringArray::new();
+        let Some(sim) = &self.sim else { return out };
+        let Some(a) = sim.agents.get(idx as usize) else {
+            return out;
+        };
+        let species = if a.species == "human" {
+            "人类"
+        } else {
+            "猫"
+        };
+        let job = a
+            .job
+            .as_deref()
+            .map(|j| {
+                sim.cfg
+                    .jobs
+                    .iter()
+                    .find(|x| x.id == j)
+                    .map(|x| x.display_name().to_string())
+                    .unwrap_or_else(|| j.to_string())
+            })
+            .unwrap_or_else(|| "无业".to_string());
+        let current = a
+            .current
+            .as_ref()
+            .map(|(b, _, end)| {
+                let label = sim
+                    .cfg
+                    .behaviors
+                    .iter()
+                    .find(|x| x.id == *b)
+                    .map(|x| x.display_name().to_string())
+                    .unwrap_or_else(|| b.clone());
+                format!("{label}（还剩 {} 分钟）", end.saturating_sub(sim.tick))
+            })
+            .unwrap_or_else(|| "闲着".to_string());
+        let area = sim
+            .cfg
+            .areas
+            .iter()
+            .find(|ar| ar.contains(a.pos))
+            .map(|ar| ar.display_name().to_string())
+            .unwrap_or_else(|| "街上".to_string());
+        out.push(a.name.as_str());
+        out.push(species);
+        out.push(job.as_str());
+        out.push(current.as_str());
+        out.push(area.as_str());
+        out
+    }
+
+    /// 代理的内心状态（密友门后）：需求与在意的负面记忆。
+    /// 只有玩家自己或亲密达标的对象可见（门在核心侧，客户端不越权）。
+    #[func]
+    fn agent_deep(&self, idx: i64) -> PackedStringArray {
+        let mut out = PackedStringArray::new();
+        let Some(sim) = &self.sim else { return out };
+        let Some(a) = sim.agents.get(idx as usize) else {
+            return out;
+        };
+        let player = sim.agents.iter().position(|p| p.is_player).unwrap_or(0) as u32;
+        if a.id == player {
+            // 自己完全可见。
+            out.push("（这是你自己）");
+            let needs = [
+                ("饥饿", a.needs.hunger),
+                ("精力", a.needs.energy),
+                ("娱乐", a.needs.fun),
+                ("社交", a.needs.social),
+                ("卫生", a.needs.hygiene),
+                ("膀胱", a.needs.bladder),
+            ];
+            for (k, v) in needs {
+                out.push(format!("{k} {:.0}", v).as_str());
+            }
+            for m in a.memory.entries.iter().filter(|m| m.valence < 0.0).take(3) {
+                out.push(format!("在意「{}」（强度 {:.2}）", m.event, m.strength).as_str());
+            }
+            return out;
+        }
+        // 其他人：密友门（设计稿 4.7）。
+        match sim.inspect_friend(player, a.id) {
+            Ok(v) => {
+                let needs = [
+                    ("饥饿", v.needs.hunger),
+                    ("精力", v.needs.energy),
+                    ("娱乐", v.needs.fun),
+                    ("社交", v.needs.social),
+                    ("卫生", v.needs.hygiene),
+                    ("膀胱", v.needs.bladder),
+                ];
+                out.push(format!("（密友 · 亲密 {:.2}）", v.bond).as_str());
+                for (k, val) in needs {
+                    out.push(format!("{k} {:.0}", val).as_str());
+                }
+                for (ev, s) in &v.fears {
+                    out.push(format!("在意「{ev}」（强度 {s:.2}）").as_str());
+                }
+            }
+            Err(e) => {
+                out.push(e.as_str());
+            }
+        }
+        out
+    }
+
     /// 累计决策数（性能自检）。
     #[func]
     fn decisions_done(&self) -> i64 {

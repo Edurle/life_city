@@ -512,17 +512,17 @@
       "spot": "table",
       "gate_need": "hunger",
       "gate_below": 70,
-      "cost": 18,
+      "cost": 13,
       "variants": [
         {
           "id": "home_rice",
           "name": "家常菜",
-          "cost": 18
+          "cost": 13
         },
         {
           "id": "home_feast",
           "name": "大鱼大肉",
-          "cost": 32,
+          "cost": 22,
           "effects": {
             "fun": 6,
             "hunger": 8
@@ -552,7 +552,7 @@
       "spot": "stove",
       "gate_need": "hunger",
       "gate_below": 60,
-      "cost": 40
+      "cost": 28
     },
     {
       "id": "instant_noodles",
@@ -572,17 +572,17 @@
       "spot": "table",
       "gate_need": "hunger",
       "gate_below": 70,
-      "cost": 10,
+      "cost": 7,
       "variants": [
         {
           "id": "noodle_beef",
           "name": "红烧牛肉面",
-          "cost": 10
+          "cost": 7
         },
         {
           "id": "noodle_seafood",
           "name": "豪华海鲜面",
-          "cost": 16,
+          "cost": 11,
           "effects": {
             "fun": 3
           },
@@ -612,17 +612,17 @@
       "spot": "sofa_h",
       "gate_need": "hunger",
       "gate_below": 55,
-      "cost": 65,
+      "cost": 46,
       "variants": [
         {
           "id": "takeout_hotpot",
           "name": "麻辣烫",
-          "cost": 32
+          "cost": 22
         },
         {
           "id": "takeout_pizza",
           "name": "披萨",
-          "cost": 38,
+          "cost": 27,
           "effects": {
             "fun": 4
           },
@@ -633,7 +633,7 @@
         {
           "id": "takeout_salad",
           "name": "轻食沙拉",
-          "cost": 28,
+          "cost": 20,
           "effects": {
             "energy": 3
           },
@@ -662,17 +662,17 @@
       "spot": "diner_table",
       "gate_need": "hunger",
       "gate_below": 60,
-      "cost": 100,
+      "cost": 70,
       "variants": [
         {
           "id": "diner_set",
           "name": "今日套餐",
-          "cost": 85
+          "cost": 59
         },
         {
           "id": "diner_signature",
           "name": "招牌硬菜",
-          "cost": 110,
+          "cost": 77,
           "effects": {
             "fun": 6
           },
@@ -698,7 +698,7 @@
         "home"
       ],
       "spot": "table",
-      "cost": 30
+      "cost": 21
     },
     {
       "id": "buy_snack",
@@ -715,17 +715,17 @@
         "outdoor"
       ],
       "spot": "shopfront",
-      "cost": 25,
+      "cost": 18,
       "variants": [
         {
           "id": "snack_chips",
           "name": "薯片",
-          "cost": 12
+          "cost": 8
         },
         {
           "id": "snack_oden",
           "name": "关东煮",
-          "cost": 18,
+          "cost": 13,
           "effects": {
             "hunger": 8
           },
@@ -861,18 +861,18 @@
       "spot": "diner_table",
       "gate_need": "social",
       "gate_below": 55,
-      "cost": 100,
+      "cost": 70,
       "pick_target": true,
       "variants": [
         {
           "id": "diner_date_set",
           "name": "双人套餐",
-          "cost": 95
+          "cost": 66
         },
         {
           "id": "diner_date_candle",
           "name": "烛光晚餐",
-          "cost": 128,
+          "cost": 90,
           "effects": {
             "fun": 8,
             "social": 8
@@ -902,17 +902,17 @@
       "spot": "tea_stand",
       "gate_need": "fun",
       "gate_below": 78,
-      "cost": 22,
+      "cost": 15,
       "variants": [
         {
           "id": "tea_pearl",
           "name": "珍珠奶茶",
-          "cost": 22
+          "cost": 15
         },
         {
           "id": "tea_taro",
           "name": "芋泥波波",
-          "cost": 26,
+          "cost": 18,
           "effects": {
             "fun": 3
           },
@@ -1004,7 +1004,7 @@
     {
       "id": "bake_work",
       "name": "面包房上工",
-      "base_weight": 6.0,
+      "base_weight": 14.0,
       "duration_min": 240,
       "duration_max": 420,
       "effects": {
@@ -1022,7 +1022,7 @@
     {
       "id": "clerk_work",
       "name": "便利店收银",
-      "base_weight": 6.0,
+      "base_weight": 14.0,
       "duration_min": 240,
       "duration_max": 420,
       "effects": {
@@ -1039,7 +1039,7 @@
     {
       "id": "office_work",
       "name": "写字间上班",
-      "base_weight": 6.0,
+      "base_weight": 14.0,
       "duration_min": 240,
       "duration_max": 420,
       "effects": {
@@ -1056,7 +1056,7 @@
     {
       "id": "patrol_work",
       "name": "街面巡逻",
-      "base_weight": 6.0,
+      "base_weight": 14.0,
       "duration_min": 200,
       "duration_max": 360,
       "effects": {
@@ -1075,7 +1075,7 @@
     {
       "id": "garden_work",
       "name": "公园养护",
-      "base_weight": 6.0,
+      "base_weight": 14.0,
       "duration_min": 200,
       "duration_max": 360,
       "effects": {
@@ -1093,7 +1093,7 @@
     {
       "id": "cook_work",
       "name": "饭馆掌勺",
-      "base_weight": 6.0,
+      "base_weight": 14.0,
       "duration_min": 240,
       "duration_max": 420,
       "effects": {
@@ -1110,7 +1110,7 @@
     {
       "id": "deliver_work",
       "name": "外卖配送",
-      "base_weight": 6.0,
+      "base_weight": 14.0,
       "duration_min": 220,
       "duration_max": 400,
       "effects": {
@@ -1139,8 +1139,8 @@
       "honesty_bias": -1.2,
       "pressure_bias": 3.0,
       "crime": {
-        "max_take": 120.0,
-        "caught_base": 0.5,
+        "max_take": 60,
+        "caught_base": 0.7,
         "service_behavior": "community_service",
         "victim_event": "被偷",
         "victim_intensity": 0.8,
@@ -1358,7 +1358,7 @@
       "id": "baker",
       "name": "面包师",
       "work_behavior": "bake_work",
-      "salary": 150,
+      "salary": 175,
       "slots": 3,
       "switch_weight": 1.0,
       "honesty_bias": 0.2
@@ -1367,8 +1367,8 @@
       "id": "clerk",
       "name": "便利店店员",
       "work_behavior": "clerk_work",
-      "salary": 130,
-      "slots": 4,
+      "salary": 155,
+      "slots": 5,
       "switch_weight": 1.0,
       "honesty_bias": 0.1
     },
@@ -1376,7 +1376,7 @@
       "id": "office_worker",
       "name": "写字间职员",
       "work_behavior": "office_work",
-      "salary": 170,
+      "salary": 195,
       "slots": 4,
       "switch_weight": 1.0,
       "honesty_bias": 0.2
@@ -1385,7 +1385,7 @@
       "id": "police",
       "name": "警察",
       "work_behavior": "patrol_work",
-      "salary": 160,
+      "salary": 185,
       "slots": 3,
       "switch_weight": 0.8,
       "honesty_bias": 0.6
@@ -1394,8 +1394,8 @@
       "id": "gardener",
       "name": "园丁",
       "work_behavior": "garden_work",
-      "salary": 120,
-      "slots": 2,
+      "salary": 145,
+      "slots": 3,
       "switch_weight": 0.9,
       "honesty_bias": 0.3
     },
@@ -1403,7 +1403,7 @@
       "id": "cook",
       "name": "厨师",
       "work_behavior": "cook_work",
-      "salary": 155,
+      "salary": 180,
       "slots": 2,
       "switch_weight": 1.0,
       "honesty_bias": 0.2
@@ -1412,7 +1412,7 @@
       "id": "courier",
       "name": "外卖骑手",
       "work_behavior": "deliver_work",
-      "salary": 140,
+      "salary": 165,
       "slots": 3,
       "switch_weight": 1.1,
       "honesty_bias": 0.0
@@ -1423,7 +1423,7 @@
       "work_behavior": "steal",
       "salary": 0,
       "slots": 0,
-      "switch_weight": 0.25,
+      "switch_weight": 0.4,
       "honesty_bias": -1.5,
       "require_honesty_below": 0.35,
       "require_pressure_above": 0.6

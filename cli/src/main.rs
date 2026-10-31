@@ -33,6 +33,9 @@ fn main() {
     let out = get("--out", "");
     let save_path = get("--save", "");
     let load_path = get("--load", "");
+    let scenario_path = get("--scenario", "");
+    let save_slot = get("--save-slot", "");
+    let load_slot = get("--load-slot", "");
 
     let json =
         std::fs::read_to_string(&assets).unwrap_or_else(|e| panic!("读取配置失败 {assets}: {e}"));
@@ -47,21 +50,52 @@ fn main() {
         r.extend(cat_roster(cat_names(cats)));
         r
     };
-    let mut world = if load_path.is_empty() {
+    let slot_dir = std::path::Path::new("saves");
+    let load_slot = if load_slot.is_empty() {
+        None
+    } else {
+        Some(load_slot)
+    };
+    let mut world = if let Some(slot) = &load_slot {
+        let mut w = World::load_from_slot(cfg, slot_dir, slot).unwrap_or_else(|e| panic!("{e}"));
+        println!(
+            "已从槽位 {slot} 恢复：第 {} 天起继续 {} 天",
+            w.tick / 1440 + 1,
+            days
+        );
+        w.set_player(0);
+        w
+    } else if load_path.is_empty() {
         let mut w = World::new(cfg, seed, roster, true);
+        w.set_player(0); // 0 号即玩家：关卡条件、日记与 LOD 分层都以玩家为锚
         w.log_meta(seed, ticks);
         w
     } else {
         let bytes =
             std::fs::read(&load_path).unwrap_or_else(|e| panic!("读取存档失败 {load_path}: {e}"));
-        let w = World::from_save(cfg, &bytes).unwrap_or_else(|e| panic!("{e}"));
+        let mut w = World::from_save(cfg, &bytes).unwrap_or_else(|e| panic!("{e}"));
         println!(
             "已从存档 {load_path} 恢复：第 {} 天起继续 {} 天",
             w.tick / 1440 + 1,
             days
         );
+        w.set_player(0);
         w
     };
+    // M6 目标关卡：加载并开局（--scenario）。
+    if !scenario_path.is_empty() {
+        let text = std::fs::read_to_string(&scenario_path)
+            .unwrap_or_else(|e| panic!("读取关卡失败 {scenario_path}: {e}"));
+        let def = living_core::scenario::load_scenario(&text).unwrap_or_else(|e| panic!("{e}"));
+        world
+            .start_scenario(def.clone())
+            .unwrap_or_else(|e| panic!("{e}"));
+        println!(
+            "关卡开始：「{}」—— {}（{} 天）",
+            def.name, def.description, def.days
+        );
+    }
+
     let t0 = Instant::now();
     world.run(ticks);
     let elapsed = t0.elapsed();
@@ -180,6 +214,86 @@ fn main() {
                 println!("  {l}");
             }
         }
+    }
+
+    // M6：关卡结算或进度 + 你的故事（M6 验收：把故事递到玩家手里）。
+    if let Some(active) = &world.scenario {
+        let def = active.def();
+        println!(
+            "\n=== 关卡「{}」{} ===",
+            def.name,
+            match active.finished {
+                Some(true) => "达成！",
+                Some(false) => "未成",
+                None => "进行中",
+            }
+        );
+        for c in world.scenario_progress() {
+            println!(
+                "  {}：{:.2} / {} {}",
+                c.label,
+                c.current,
+                c.target,
+                if c.met { "✓" } else { "" }
+            );
+        }
+    }
+    if world.logger.enabled && !world.agents.is_empty() {
+        let name_of = |id: u32| -> String {
+            world
+                .agents
+                .iter()
+                .find(|a| a.id == id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| format!("#{id}"))
+        };
+        let label = |bid: &str, vid: Option<&str>| -> String {
+            let b = world
+                .cfg
+                .behaviors
+                .iter()
+                .find(|x| x.id == bid)
+                .map(|x| x.display_name().to_string())
+                .unwrap_or_else(|| bid.to_string());
+            match vid {
+                Some(v) => {
+                    let vn = world
+                        .cfg
+                        .behaviors
+                        .iter()
+                        .flat_map(|x| x.variants.iter())
+                        .find(|x| x.id == v)
+                        .map(|x| x.display_name().to_string())
+                        .unwrap_or_else(|| v.to_string());
+                    format!("{b}·{vn}")
+                }
+                None => b,
+            }
+        };
+        let all: Vec<living_core::LogEvent> = world
+            .logger
+            .buf
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let story = living_core::diary::player_story(&all, 0, name_of, &label);
+        if !story.is_empty() {
+            println!("\n=== {} 的故事 ===", world.agents[0].name);
+            for l in &story {
+                println!("  {l}");
+            }
+        }
+    }
+    if !save_slot.is_empty() {
+        world
+            .save_to_slot(slot_dir, &save_slot)
+            .unwrap_or_else(|e| panic!("写槽位失败: {e}"));
+        let meta = world.save_meta();
+        println!(
+            "槽位 {save_slot} 已保存（第 {} 天，{} 名居民）",
+            meta.day + 1,
+            meta.agents
+        );
     }
 
     if !save_path.is_empty() {

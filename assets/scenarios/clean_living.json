@@ -1,0 +1,13 @@
+{
+  "id": "clean_living",
+  "name": "好好过日子",
+  "description": "一个月，攒下 400 块，一口泡面都不吃，也一次手都不伸。日子是过出来的。",
+  "days": 30,
+  "win": [
+    { "kind": "wallet", "min": 400 },
+    { "kind": "behavior_count", "behavior": "instant_noodles", "agent": "player", "max": 0 },
+    { "kind": "behavior_count", "behavior": "steal", "agent": "player", "max": 0 }
+  ]
+  ,
+  "inject_events": []
+}
