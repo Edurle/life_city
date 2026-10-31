@@ -635,7 +635,8 @@ impl World {
             // 社交结算前先（只读）找同地点的同伴。
             // 一次社交时光最多与 3 位同伴结缘（按编号序）：密集世界里猫的
             // 注意力有限，也避免人人相识导致的 O(度数) 关系爆炸。
-            let mut companions: Vec<(u32, bool)> = Vec::new();
+            // 条目为 (对象, 对方是否玩家, 亲密增长折扣)。
+            let mut companions: Vec<(u32, bool, f64)> = Vec::new();
             if let Some(d) = &def {
                 if d.tags.iter().any(|t| t == "social") {
                     if let Some(spot_id) = &d.spot {
@@ -655,9 +656,22 @@ impl World {
                                     })
                                     .unwrap_or(false);
                                 if same_spot {
-                                    companions.push((o.id, o.is_player));
+                                    companions.push((o.id, o.is_player, 1.0));
                                 }
                             }
+                        }
+                    } else if d.tags.iter().any(|t| t == "remote_social") {
+                        // 远程社交（打电话，M4.5）：不要求同地点——从认识名单里
+                        // 随机挑一位聊几句（用代理自己的决策流，回放确定）。
+                        // 效果打折：隔着电话不如见面亲。
+                        let ids = self.relations.acquaintance_ids(idx as u32);
+                        if !ids.is_empty() {
+                            let pick = self.agents[idx]
+                                .rng_decision
+                                .uniform_int(0, (ids.len() - 1) as u64)
+                                as usize;
+                            let oid = ids[pick];
+                            companions.push((oid, self.agents[oid as usize].is_player, 0.6));
                         }
                     }
                 }
@@ -728,12 +742,12 @@ impl World {
             if !companions.is_empty() {
                 let me_id = a.id;
                 let me_player = a.is_player;
-                for (oid, other_player) in companions {
+                for (oid, other_player, discount) in companions {
                     let gain = if me_player || other_player {
                         self.cfg.params.bond_player_gain
                     } else {
                         self.cfg.params.bond_social_gain
-                    };
+                    } * discount;
                     let value = self.relations.add_bond(me_id, oid, gain);
                     events.push(LogEvent::BondChange {
                         tick,
@@ -986,6 +1000,7 @@ impl World {
                     self.cfg.tree_for(&self.agents[idx].species),
                     &self.agents[idx].needs,
                     &self.behaviors,
+                    &self.cfg.subtrees,
                     hour,
                     &mut ids,
                 );
@@ -1847,6 +1862,7 @@ fn compute_options(
         cfg.tree_for(&a.species),
         &a.needs,
         behaviors,
+        &cfg.subtrees,
         hour_of(tick) as u32,
         &mut avail,
     );

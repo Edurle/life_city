@@ -18,6 +18,10 @@ pub struct SimConfig {
     /// 物种 → 行为树（M3：人类与猫同街生活）。空 = 全部用默认树。
     #[serde(default)]
     pub trees: BTreeMap<String, TreeNode>,
+    /// 命名子树（M4.5：Subtree 引用节点的解析表）。内容模块化——
+    /// 职业、日常作息等通用结构定义一次、多树复用，不复制粘贴。
+    #[serde(default)]
+    pub subtrees: BTreeMap<String, TreeNode>,
     pub spots: Vec<SpotDef>,
     /// 地点（M3）：区域定义——街道地图上的矩形，声誉与整洁度的载体。
     #[serde(default)]
@@ -31,10 +35,10 @@ impl SimConfig {
         self.trees.get(species).unwrap_or(&self.tree)
     }
 
-    /// 物种用到的行为 ID 集合（树叶遍历；权重表只装这些）。
+    /// 物种用到的行为 ID 集合（树叶遍历，含子树展开；权重表只装这些）。
     pub fn species_behaviors(&self, species: &str) -> Vec<(String, f64)> {
         let mut ids: Vec<String> = Vec::new();
-        collect_actions(self.tree_for(species), &mut ids);
+        collect_actions(self.tree_for(species), &self.subtrees, &mut ids);
         self.behaviors
             .iter()
             .filter(|b| ids.contains(&b.id))
@@ -43,15 +47,24 @@ impl SimConfig {
     }
 }
 
-fn collect_actions(node: &TreeNode, out: &mut Vec<String>) {
+fn collect_actions(
+    node: &TreeNode,
+    subtrees: &BTreeMap<String, TreeNode>,
+    out: &mut Vec<String>,
+) {
     match node {
         TreeNode::Selector { children } => {
             for c in children {
-                collect_actions(c, out);
+                collect_actions(c, subtrees, out);
             }
         }
         TreeNode::Gate { child, .. } | TreeNode::TimeGate { child, .. } => {
-            collect_actions(child, out)
+            collect_actions(child, subtrees, out)
+        }
+        TreeNode::Subtree { tree_ref } => {
+            if let Some(sub) = subtrees.get(tree_ref) {
+                collect_actions(sub, subtrees, out);
+            }
         }
         TreeNode::Action { behavior } => {
             if !out.contains(behavior) {
@@ -394,6 +407,12 @@ pub enum TreeNode {
         to: u32,
         child: Box<TreeNode>,
     },
+    /// 子树引用（M4.5）：按名查 cfg.subtrees，原地展开。
+    /// 校验保证引用存在且无环。
+    Subtree {
+        #[serde(rename = "ref")]
+        tree_ref: String,
+    },
     Action {
         behavior: String,
     },
@@ -489,9 +508,14 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
             }
         }
     }
-    validate_tree(&cfg.tree, &behavior_ids)?;
+    validate_tree(&cfg.tree, &behavior_ids, &cfg.subtrees, &mut Vec::new())?;
     for (species, tree) in &cfg.trees {
-        validate_tree(tree, &behavior_ids).map_err(|e| format!("物种 {species} 的树：{e}"))?;
+        validate_tree(tree, &behavior_ids, &cfg.subtrees, &mut Vec::new())
+            .map_err(|e| format!("物种 {species} 的树：{e}"))?;
+    }
+    for (name, tree) in &cfg.subtrees {
+        validate_tree(tree, &behavior_ids, &cfg.subtrees, &mut Vec::new())
+            .map_err(|e| format!("子树 {name}：{e}"))?;
     }
     for s in &cfg.spots {
         if let Some(a) = &s.area {
@@ -554,16 +578,34 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_tree(node: &TreeNode, ids: &[&str]) -> Result<(), String> {
+/// 树校验：行为引用合法；子树引用存在且无环（正在展开路径上的再次引用即环）。
+fn validate_tree(
+    node: &TreeNode,
+    ids: &[&str],
+    subtrees: &BTreeMap<String, TreeNode>,
+    visiting: &mut Vec<String>,
+) -> Result<(), String> {
     match node {
         TreeNode::Selector { children } => {
             for c in children {
-                validate_tree(c, ids)?;
+                validate_tree(c, ids, subtrees, visiting)?;
             }
             Ok(())
         }
         TreeNode::Gate { child, .. } | TreeNode::TimeGate { child, .. } => {
-            validate_tree(child, ids)
+            validate_tree(child, ids, subtrees, visiting)
+        }
+        TreeNode::Subtree { tree_ref } => {
+            if !subtrees.contains_key(tree_ref) {
+                return Err(format!("引用了未定义的子树 {tree_ref}"));
+            }
+            if visiting.iter().any(|r| r == tree_ref) {
+                return Err(format!("子树 {tree_ref} 出现循环引用"));
+            }
+            visiting.push(tree_ref.clone());
+            let r = validate_tree(&subtrees[tree_ref], ids, subtrees, visiting);
+            visiting.pop();
+            r
         }
         TreeNode::Action { behavior } => {
             if ids.contains(&behavior.as_str()) {

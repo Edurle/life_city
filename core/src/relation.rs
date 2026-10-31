@@ -97,6 +97,14 @@ impl Relations {
             .flatten()
     }
 
+    /// 认识名单（有关系的对象 ID，键序确定）——远程社交（打电话）从中挑人。
+    pub fn acquaintance_ids(&self, a: u32) -> Vec<u32> {
+        self.adj
+            .get(&a)
+            .map(|m| m.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// 与指定代理最亲近的若干对象（按亲密值降序），供汇总与查看器展示。
     pub fn top_for(&self, a: u32, k: usize) -> Vec<(u32, f64)> {
         let mut v: Vec<(u32, f64)> = self

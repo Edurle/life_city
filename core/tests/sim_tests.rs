@@ -1545,3 +1545,124 @@ fn m4_script_replay_deterministic() {
     script(&mut b);
     assert_eq!(a.logger.buf, b.logger.buf, "含目标操作的运行应字节级一致");
 }
+
+// ---------- M4.5：内容热身——吃饭变体、远程社交、最小工作、子树 ----------
+
+fn street_cfg() -> living_core::SimConfig {
+    let json = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../assets/street.json"
+    ))
+    .expect("需要 assets/street.json");
+    load_config(&json).unwrap()
+}
+
+fn street_world(seed: u64, humans: usize, cats: usize) -> World {
+    let mut roster: Vec<(String, String)> = living_core::human_names(humans)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    roster.extend(cat_roster(cat_names(cats)));
+    let mut w = World::new(street_cfg(), seed, roster, true);
+    w.log_meta(seed, 0);
+    w
+}
+
+/// 街道内容冒烟：人类会去上班、吃东西有多个变体、猫不碰人类专属行为；
+/// 子树引用的树跑起来与直接定义无差别（校验 + 遍历已由单元测试锁定）。
+#[test]
+fn street_humans_work_and_eat_variely() {
+    let mut w = street_world(21, 5, 2);
+    w.run(4 * 1440);
+    let execs = |id: usize, b: &str| w.agents[id].exec_counts.get(b).copied().unwrap_or(0);
+    // 上班：工作时段的人真的去上班（4 天内多名人类执行过）。
+    let work_total: u64 = (0..5).map(|i| execs(i, "go_to_work")).sum();
+    assert!(work_total >= 6, "四天里应有多次上班记录：{work_total}");
+    // 吃饭变体：全体人类至少动用过 3 种吃法（在家/下厨/泡面/外卖/下馆子/夜宵）。
+    let foods = [
+        "eat_home", "cook_fancy", "instant_noodles", "order_takeout", "diner_meal", "late_snack",
+    ];
+    let used: Vec<&str> = foods
+        .iter()
+        .copied()
+        .filter(|b| (0..5).any(|i| execs(i, b) > 0))
+        .collect();
+    println!("[M4.5] 四天里人类用过的吃法：{used:?}（上班 {work_total} 次）");
+    assert!(used.len() >= 3, "吃饭应有真实选择余地：{used:?}");
+    // 物种隔离：猫不执行人类的新行为。
+    for i in 5..7 {
+        for b in ["go_to_work", "cook_fancy", "phone_call", "diner_meal"] {
+            assert_eq!(execs(i, b), 0, "猫不应执行 {b}");
+        }
+    }
+}
+
+/// 远程社交（打电话）：不见面也能维系关系——完成通话与认识名单里的人增长亲密。
+#[test]
+fn phone_call_grows_bond_without_meeting() {
+    let mut w = street_world(23, 3, 0);
+    w.collect_recent = true;
+    // 清空初始熟悉度、三人分处地图三个角落（绝无同地点可能）。
+    for i in 0..3 {
+        for j in 0..3 {
+            if i != j {
+                w.set_bond(i, j, 0.0);
+            }
+        }
+    }
+    w.teleport(0, (2.0, 2.0));
+    w.teleport(1, (36.0, 18.0));
+    w.teleport(2, (20.0, 10.0));
+    // 强制 0 号打两通电话。
+    for _ in 0..2 {
+        w.agents[0].pending_command = Some("phone_call".into());
+        w.agents[0].next_heartbeat = w.tick + 1;
+        w.run(40);
+    }
+    let bonds: Vec<f64> = vec![w.bond(0, 1), w.bond(0, 2)];
+    println!("[M4.5] 两通电话后的亲密：{bonds:?}");
+    assert!(
+        bonds.iter().any(|b| *b > 0.0),
+        "远程社交应与认识的人增长亲密（哪怕不见面）"
+    );
+    assert!(
+        w.recent_events
+            .iter()
+            .any(|e| matches!(e, living_core::LogEvent::BondChange { a: 0, .. })),
+        "应有亲密变化日志"
+    );
+}
+
+/// 下馆子是社交场合：两人同桌吃饭 → 亲密增长（约饭，机制为内容配置）。
+#[test]
+fn dining_together_grows_bond() {
+    let mut w = street_world(27, 2, 0);
+    w.set_bond(0, 1, 0.0);
+    // 两人同时被派去饭馆。
+    for i in 0..2 {
+        w.agents[i].pending_command = Some("diner_meal".into());
+        w.agents[i].next_heartbeat = w.tick + 1;
+    }
+    let before = w.bond(0, 1);
+    w.run(60);
+    let after = w.bond(0, 1);
+    println!("[M4.5] 同桌下馆子：亲密 {before:.3} → {after:.3}");
+    assert!(after > before, "同桌吃饭应拉近关系（社交标签 + 同地点）");
+}
+
+/// 上班的职业习惯雏形：高频执行的上班行为权重升高（设计稿 5.3 的机制基础）。
+#[test]
+fn work_becomes_habit() {
+    let mut w = street_world(29, 3, 0);
+    w.run(6 * 1440);
+    let a = &w.agents[0];
+    let ratio = a.weights["go_to_work"] / a.base_weights["go_to_work"];
+    println!(
+        "[M4.5] 六天后上班权重倍数：×{ratio:.2}（执行 {} 次）",
+        a.exec_counts.get("go_to_work").copied().unwrap_or(0)
+    );
+    assert!(
+        ratio > 1.05,
+        "天天上班应自然累积职业习惯（当前 ×{ratio:.2}）"
+    );
+}

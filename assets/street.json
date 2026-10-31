@@ -85,6 +85,24 @@
       "w": 7,
       "h": 18,
       "litter_scale": 0.1
+    },
+    {
+      "id": "diner",
+      "name": "小饭馆",
+      "x": 25,
+      "y": 1,
+      "w": 6,
+      "h": 5,
+      "litter_scale": 0.6
+    },
+    {
+      "id": "office",
+      "name": "写字间",
+      "x": 25,
+      "y": 15,
+      "w": 6,
+      "h": 5,
+      "litter_scale": 0.3
     }
   ],
   "spots": [
@@ -289,6 +307,37 @@
       "x": 35,
       "y": 17.5,
       "area": "home"
+    },
+    {
+      "id": "stove",
+      "tags": [
+        "home",
+        "cook"
+      ],
+      "x": 38.5,
+      "y": 11,
+      "area": "home"
+    },
+    {
+      "id": "diner_table",
+      "tags": [
+        "food",
+        "diner",
+        "indoor"
+      ],
+      "x": 28,
+      "y": 3.5,
+      "area": "diner"
+    },
+    {
+      "id": "office_desk",
+      "tags": [
+        "work",
+        "indoor"
+      ],
+      "x": 28,
+      "y": 17.5,
+      "area": "office"
     }
   ],
   "behaviors": [
@@ -671,6 +720,120 @@
       "spot": "litter",
       "gate_need": "bladder",
       "gate_below": 50
+    },
+    {
+      "id": "cook_fancy",
+      "name": "下厨做顿好的",
+      "base_weight": 1.8,
+      "duration_min": 40,
+      "duration_max": 80,
+      "effects": {
+        "hunger": 60,
+        "fun": 14,
+        "energy": -5
+      },
+      "tags": [
+        "food",
+        "cook",
+        "home"
+      ],
+      "spot": "stove",
+      "gate_need": "hunger",
+      "gate_below": 60
+    },
+    {
+      "id": "instant_noodles",
+      "name": "泡个面",
+      "base_weight": 1.6,
+      "duration_min": 8,
+      "duration_max": 15,
+      "effects": {
+        "hunger": 25,
+        "fun": 3
+      },
+      "tags": [
+        "food",
+        "quick",
+        "home"
+      ],
+      "spot": "table",
+      "gate_need": "hunger",
+      "gate_below": 70
+    },
+    {
+      "id": "order_takeout",
+      "name": "点外卖",
+      "base_weight": 1.7,
+      "duration_min": 45,
+      "duration_max": 90,
+      "effects": {
+        "hunger": 45,
+        "fun": 8,
+        "energy": 3
+      },
+      "tags": [
+        "food",
+        "takeout",
+        "home",
+        "relax"
+      ],
+      "spot": "sofa_h",
+      "gate_need": "hunger",
+      "gate_below": 65
+    },
+    {
+      "id": "diner_meal",
+      "name": "下馆子",
+      "base_weight": 1.6,
+      "duration_min": 25,
+      "duration_max": 50,
+      "effects": {
+        "hunger": 50,
+        "fun": 15,
+        "social": 12
+      },
+      "tags": [
+        "food",
+        "diner",
+        "social"
+      ],
+      "spot": "diner_table",
+      "gate_need": "hunger",
+      "gate_below": 70
+    },
+    {
+      "id": "phone_call",
+      "name": "打电话唠嗑",
+      "base_weight": 1.4,
+      "duration_min": 10,
+      "duration_max": 25,
+      "effects": {
+        "social": 18,
+        "fun": 5
+      },
+      "tags": [
+        "social",
+        "remote_social"
+      ],
+      "gate_need": "social",
+      "gate_below": 60
+    },
+    {
+      "id": "go_to_work",
+      "name": "上班",
+      "base_weight": 5.0,
+      "duration_min": 120,
+      "duration_max": 300,
+      "effects": {
+        "energy": -10,
+        "fun": -3,
+        "social": 14
+      },
+      "tags": [
+        "work",
+        "indoor"
+      ],
+      "spot": "office_desk"
     }
   ],
   "tree": {
@@ -762,63 +925,20 @@
       "type": "selector",
       "children": [
         {
-          "type": "gate",
-          "need": "hunger",
-          "below": 70,
-          "child": {
-            "type": "action",
-            "behavior": "eat_home"
-          }
+          "type": "subtree",
+          "ref": "meals"
         },
         {
-          "type": "time_gate",
-          "from": 22,
-          "to": 6,
-          "child": {
-            "type": "gate",
-            "need": "energy",
-            "below": 80,
-            "child": {
-              "type": "action",
-              "behavior": "sleep_home"
-            }
-          }
+          "type": "subtree",
+          "ref": "rest"
         },
         {
-          "type": "gate",
-          "need": "energy",
-          "below": 45,
-          "child": {
-            "type": "action",
-            "behavior": "sleep_home"
-          }
+          "type": "subtree",
+          "ref": "socializing"
         },
         {
-          "type": "gate",
-          "need": "hygiene",
-          "below": 55,
-          "child": {
-            "type": "action",
-            "behavior": "shower"
-          }
-        },
-        {
-          "type": "gate",
-          "need": "bladder",
-          "below": 50,
-          "child": {
-            "type": "action",
-            "behavior": "toilet_h"
-          }
-        },
-        {
-          "type": "gate",
-          "need": "social",
-          "below": 60,
-          "child": {
-            "type": "action",
-            "behavior": "chat_street"
-          }
+          "type": "subtree",
+          "ref": "work"
         },
         {
           "type": "time_gate",
@@ -844,15 +964,6 @@
                 "behavior": "stroll"
               }
             ]
-          }
-        },
-        {
-          "type": "time_gate",
-          "from": 21,
-          "to": 24,
-          "child": {
-            "type": "action",
-            "behavior": "late_snack"
           }
         },
         {
@@ -967,5 +1078,144 @@
       },
       "immune_behavior_tags": []
     }
-  ]
+  ],
+  "subtrees": {
+    "meals": {
+      "type": "selector",
+      "children": [
+        {
+          "type": "gate",
+          "need": "hunger",
+          "below": 70,
+          "child": {
+            "type": "action",
+            "behavior": "eat_home"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "hunger",
+          "below": 60,
+          "child": {
+            "type": "action",
+            "behavior": "cook_fancy"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "hunger",
+          "below": 70,
+          "child": {
+            "type": "action",
+            "behavior": "instant_noodles"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "hunger",
+          "below": 65,
+          "child": {
+            "type": "action",
+            "behavior": "order_takeout"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "hunger",
+          "below": 70,
+          "child": {
+            "type": "action",
+            "behavior": "diner_meal"
+          }
+        },
+        {
+          "type": "time_gate",
+          "from": 21,
+          "to": 24,
+          "child": {
+            "type": "action",
+            "behavior": "late_snack"
+          }
+        }
+      ]
+    },
+    "rest": {
+      "type": "selector",
+      "children": [
+        {
+          "type": "time_gate",
+          "from": 22,
+          "to": 6,
+          "child": {
+            "type": "gate",
+            "need": "energy",
+            "below": 80,
+            "child": {
+              "type": "action",
+              "behavior": "sleep_home"
+            }
+          }
+        },
+        {
+          "type": "gate",
+          "need": "energy",
+          "below": 45,
+          "child": {
+            "type": "action",
+            "behavior": "sleep_home"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "hygiene",
+          "below": 55,
+          "child": {
+            "type": "action",
+            "behavior": "shower"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "bladder",
+          "below": 50,
+          "child": {
+            "type": "action",
+            "behavior": "toilet_h"
+          }
+        }
+      ]
+    },
+    "socializing": {
+      "type": "selector",
+      "children": [
+        {
+          "type": "gate",
+          "need": "social",
+          "below": 60,
+          "child": {
+            "type": "action",
+            "behavior": "chat_street"
+          }
+        },
+        {
+          "type": "gate",
+          "need": "social",
+          "below": 60,
+          "child": {
+            "type": "action",
+            "behavior": "phone_call"
+          }
+        }
+      ]
+    },
+    "work": {
+      "type": "time_gate",
+      "from": 9,
+      "to": 18,
+      "child": {
+        "type": "action",
+        "behavior": "go_to_work"
+      }
+    }
+  }
 }
