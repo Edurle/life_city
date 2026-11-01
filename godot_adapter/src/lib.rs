@@ -167,6 +167,43 @@ impl SimNode {
         out
     }
 
+    /// 区域 id（与 area_rects/area_states 同序）。3D 客户端用 Area_<id> 场景文件
+    /// 名把区域状态关联到对应楼群的材质上。
+    #[func]
+    fn area_ids(&self) -> PackedStringArray {
+        let mut out = PackedStringArray::new();
+        if let Some(sim) = &self.sim {
+            for a in &sim.cfg.areas {
+                out.push(a.id.as_str());
+            }
+        }
+        out
+    }
+
+    /// 区域是否承载小镇生活（有 spot 或时间窗事件引用它）：纯装饰道路为 0。
+    /// 声誉染色只上有生活的区域——无人到访的道路没有口碑可言。
+    #[func]
+    fn area_active(&self) -> PackedByteArray {
+        let mut out = PackedByteArray::new();
+        if let Some(sim) = &self.sim {
+            let mut living = std::collections::BTreeSet::new();
+            for s in &sim.cfg.spots {
+                if let Some(a) = &s.area {
+                    living.insert(a.as_str());
+                }
+            }
+            for e in &sim.cfg.env_events {
+                if let Some(a) = &e.area {
+                    living.insert(a.as_str());
+                }
+            }
+            for a in &sim.cfg.areas {
+                out.push(u8::from(living.contains(a.id.as_str())));
+            }
+        }
+        out
+    }
+
     /// 地点矩形的像素坐标（Godot 的 y 向下；世界 y 向上 → 翻转）。
     #[func]
     fn spot_positions(&self) -> PackedVector2Array {

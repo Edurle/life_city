@@ -1,6 +1,8 @@
-# 《活城》3D 小镇客户端（M7 一阶段：同构美术场景竖切）。
+# 《活城》3D 小镇客户端（M7 一阶段：同构美术场景竖切；二阶段：点选居民 + 声誉染色）。
 # 场景资产由 town.json 经 Blender 同构生成导出（assets3d/*.glb，按区域分文件）；
 # 卡通外观由 shader 按材质名携带的参数重建（flat|/fx|/stripe|，见 shaders/）。
+# 旁观模式（移植自 M6 2D 客户端）：点居民看公开信息，密友门内才见内心（门在核心侧）；
+# 楼群材质按区域声誉染色（红低绿高，健康带不上色）。
 # 模拟全部住在 Rust 核心（SimNode），本脚本只读快照；代理用 MultiMesh 批量渲染。
 extends Node3D
 
@@ -33,6 +35,29 @@ var no_toon := false          # --no-toon：直接用 GLB 自带烘焙贴图（�
 var detail_on := false        # --detail：程序化细节（立面窗户/店面 + 路面标线；默认纯色模式）
 var agent_count := 0
 var species_bytes := PackedByteArray()
+# 区域声誉染色：Area_<区域id> 文件 → 该区域全部卡通材质（各文件独立缓存，不跨区共享）。
+var area_mats := {}            # 区域 id → Array[ShaderMaterial]
+var area_rep_last := {}        # 区域 id → 上次写入的声誉（变化小于阈值不重设）
+# 声誉 → 染色的映射：0.68–0.90 是"健康带"不上色——声誉静息在 0.7 上下，
+# 日常波动不打扰画面；跌破下界转砖红（口碑不佳即泛粉，0.38 处到上限），
+# 突破上界淡入薄荷绿（口碑极佳）。数值是表现层调参，改这里不改核心。
+const REP_FLOOR := 0.68
+const REP_CEIL := 0.90
+const REP_RED := Color(0.82, 0.30, 0.24)
+const REP_GREEN := Color(0.42, 0.78, 0.52)
+const REP_RED_AMT := 0.55
+const REP_GREEN_AMT := 0.35
+# 点选居民（旁观模式，M6 移植）
+var selected := -1             # 选中代理下标；-1 = 无
+var follow := false            # 跟随镜头
+var press_pos := Vector2.ZERO  # 左键按下位置（区分点击与拖拽）
+var press_ms := 0
+var sel_ring: MeshInstance3D   # 选中者脚下光环
+var inspect_panel: PanelContainer
+var inspect_title: Label
+var inspect_body: RichTextLabel
+var follow_btn: Button
+var select_arg := -1           # --select=N：启动即选中（截图自检用）
 # 视觉平滑：核心里"位置由行为决定"（开始行为即就位，路上时间不建模），
 # 表现层用指数趋近把跳变抹成连续滑动——核心语义与确定性不动。
 var visual_pos := PackedVector3Array()
@@ -56,6 +81,8 @@ func _ready() -> void:
 			no_toon = true
 		elif arg == "--detail":
 			detail_on = true
+		elif arg.begins_with("--select="):
+			select_arg = arg.substr(9).to_int()
 	if screenshot_after > 0.0:
 		get_window().size = Vector2i(1920, 1080)
 	sim.start(42, cfg_path, 14, 3)
@@ -69,7 +96,11 @@ func _ready() -> void:
 	_build_town()
 	_build_camera()
 	_build_agents()
+	_build_selection_ring()
 	_build_ui()
+	if select_arg >= 0 and select_arg < agent_count:
+		selected = select_arg
+		_refresh_inspect()
 	print("[town3d] 启动：%d 名居民，配置 %s" % [agent_count, cfg_path])
 
 func _build_environment() -> void:
@@ -101,6 +132,7 @@ func _build_town() -> void:
 	var flat_shader: Shader = load("res://shaders/toon_flat.gdshader")
 	var fx_shader: Shader = load("res://shaders/toon_facade.gdshader")
 	var st_shader: Shader = load("res://shaders/toon_stripe.gdshader")
+	var ground_cache := {}   # Ground/Wires 共用缓存（不染色，仅同名材质去重）
 	for fname in AREA_FILES:
 		var path := "res://assets3d/%s.glb" % fname
 		if not FileAccess.file_exists(path):
@@ -110,8 +142,16 @@ func _build_town() -> void:
 		var node := packed.instantiate()
 		node.name = fname
 		add_child(node)
-		if not no_toon:
-			_retint(node, flat_shader, fx_shader, st_shader)
+		if no_toon:
+			continue
+		if fname.begins_with("Area_"):
+			# 区域文件：材质独立缓存（同名不跨区共享——声誉各染各的），
+			# 归集到区域 id 名下供 _apply_area_reputation 统一上色。
+			var mats: Array[ShaderMaterial] = []
+			_retint(node, flat_shader, fx_shader, st_shader, {}, mats)
+			area_mats[fname.substr(5)] = mats
+		else:
+			_retint(node, flat_shader, fx_shader, st_shader, ground_cache, [])
 
 # 材质名 → 卡通 shader 参数（名字是 Blender 侧唯一可靠的数据通道）
 func _base_name(n: String) -> String:
@@ -124,12 +164,7 @@ func _base_name(n: String) -> String:
 func _v3(c: Color) -> Vector3:
 	return Vector3(c.r, c.g, c.b)
 
-func _toon_mat(m: Material, fs: Shader, xs: Shader, ss: Shader) -> ShaderMaterial:
-	var nm := _base_name(m.resource_name)
-	return _toon_mat_inner(m, fs, xs, ss)
-
-func _toon_mat_inner(m: Material, fs: Shader, xs: Shader, ss: Shader) -> ShaderMaterial:
-	var nm := _base_name(m.resource_name)
+func _toon_mat(nm: String, fs: Shader, xs: Shader, ss: Shader) -> ShaderMaterial:
 	if nm.begins_with("flat|#"):
 		var sm := ShaderMaterial.new()
 		sm.shader = fs
@@ -162,18 +197,26 @@ func _toon_mat_inner(m: Material, fs: Shader, xs: Shader, ss: Shader) -> ShaderM
 		return sm
 	return null
 
-func _retint(node: Node, fs: Shader, xs: Shader, ss: Shader) -> void:
+func _retint(node: Node, fs: Shader, xs: Shader, ss: Shader, cache: Dictionary, out: Array) -> void:
+	# 同名材质（参数相同）整个文件共用一份 ShaderMaterial；解析结果（含 null）
+	# 进缓存，未认识的材质保留 GLB 原样。
 	if node is MeshInstance3D:
 		var mi := node as MeshInstance3D
 		for i in mi.get_surface_override_material_count():
 			var m: Material = mi.get_active_material(i)
 			if m == null:
 				continue
-			var sm := _toon_mat(m, fs, xs, ss)
+			var nm := _base_name(m.resource_name)
+			if not cache.has(nm):
+				var made := _toon_mat(nm, fs, xs, ss)
+				cache[nm] = made
+				if made != null:
+					out.push_back(made)
+			var sm: ShaderMaterial = cache[nm]
 			if sm != null:
 				mi.set_surface_override_material(i, sm)
 	for c in node.get_children():
-		_retint(c, fs, xs, ss)
+		_retint(c, fs, xs, ss, cache, out)
 
 func _build_camera() -> void:
 	# 正交 31° 斜俯视、方位角斜转 25°——与 Blender 验证机位一致（旋转锁定）。
@@ -200,6 +243,7 @@ func _apply_camera() -> void:
 
 func _rotate_view(dir: int) -> void:
 	# 光照固定在世界空间（不随视角转）——转到背面看到的就是真实的背光面。
+	_stop_follow()
 	cam_yaw += dir
 	cam_offset_tgt = BASE_OFFSET.rotated(Vector3.UP, cam_yaw * (PI / 2.0))
 
@@ -212,6 +256,7 @@ func _ground_point(screen_px: Vector2) -> Vector3:
 	return o + d * (-o.y / d.y)
 
 func _pan(rel: Vector2) -> void:
+	_stop_follow()
 	# 像素位移 → 世界位移（抓地：内容跟手，相机反向/纵向移动）
 	var spp := camera.size / get_viewport().get_visible_rect().size.y
 	var basis := camera.global_transform.basis
@@ -235,7 +280,18 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
-		if mb.button_index == MOUSE_BUTTON_LEFT or mb.button_index == MOUSE_BUTTON_MIDDLE:
+		if mb.button_index == MOUSE_BUTTON_LEFT:
+			if mb.pressed:
+				dragging = true
+				press_pos = mb.position
+				press_ms = Time.get_ticks_msec()
+			else:
+				dragging = false
+				# 位移小、按得短 = 点击点选（否则是拖拽平移）
+				if mb.position.distance_squared_to(press_pos) < 36.0 \
+						and Time.get_ticks_msec() - press_ms < 400:
+					_click_select(mb.position)
+		elif mb.button_index == MOUSE_BUTTON_MIDDLE:
 			dragging = mb.pressed
 		elif mb.pressed and mb.button_index == MOUSE_BUTTON_WHEEL_UP:
 			_zoom_at(mb.position, 0.85)
@@ -248,6 +304,116 @@ func _unhandled_input(event: InputEvent) -> void:
 			_rotate_view(1)
 		elif event.keycode == KEY_E:
 			_rotate_view(-1)
+		elif event.keycode == KEY_ESCAPE:
+			_deselect()
+
+func _pick_agent(screen_px: Vector2) -> int:
+	# 屏幕空间最近拾取：正交相机下投影位置即所见位置（场景无碰撞体，
+	# 楼后的代理同样可选——与 2D 客户端一致的近似）。几位代理几乎重叠时
+	# 取离相机最近的（看起来在前面的那位）。
+	var best := -1
+	var best_d := INF        # 屏幕距离²
+	var best_depth := INF    # 相机距离²
+	const NEAR_SQ := 144.0   # 12px 内视为重叠
+	const TOL_SQ := 1024.0   # 32px 内算点中
+	for i in visual_pos.size():
+		var vp: Vector3 = visual_pos[i]
+		if camera.is_position_behind(vp):
+			continue
+		var sp := camera.unproject_position(vp + Vector3(0, 0.55, 0))
+		var d: float = sp.distance_squared_to(screen_px)
+		if d > TOL_SQ:
+			continue
+		var depth: float = camera.global_position.distance_squared_to(vp)
+		if d < best_d - NEAR_SQ or (d <= best_d + NEAR_SQ and depth < best_depth):
+			best = i
+			best_d = minf(best_d, d)
+			best_depth = depth
+	return best
+
+func _click_select(screen_px: Vector2) -> void:
+	var idx := _pick_agent(screen_px)
+	if idx < 0:
+		_deselect()
+		return
+	selected = idx
+	_refresh_inspect()
+
+func _deselect() -> void:
+	selected = -1
+	_stop_follow()
+	inspect_title.text = "点击一位居民看看"
+	inspect_body.clear()
+	inspect_body.append_text("（旁观模式：[b]表面[/b]人人可见——在做什么、在哪里；需求与内心只有 [b]自己或密友[/b] 能看到。）")
+
+func _stop_follow() -> void:
+	follow = false
+	if follow_btn != null:
+		follow_btn.text = "跟随镜头：关"
+
+func _refresh_inspect() -> void:
+	if selected < 0:
+		return
+	var brief: PackedStringArray = sim.agent_brief(selected)
+	if brief.size() >= 5:
+		inspect_title.text = "%s（%s · %s）" % [brief[0], brief[1], brief[2]]
+		inspect_body.clear()
+		inspect_body.append_text("正在：%s\n地点：%s\n" % [brief[3], brief[4]])
+		for line in sim.agent_deep(selected):
+			inspect_body.append_text(line + "\n")
+	elif brief.size() >= 3:
+		# 离场者（M6 人口退出）：名册保留可查，人已不在镇上——跟随自然结束。
+		inspect_title.text = "%s（已离开小镇）" % brief[0]
+		inspect_body.clear()
+		inspect_body.append_text(brief[2] + "\n")
+		_stop_follow()
+
+func _toggle_follow() -> void:
+	if selected < 0:
+		return
+	follow = not follow
+	follow_btn.text = "跟随镜头：开" if follow else "跟随镜头：关"
+
+func _rep_tint(rep: float) -> Array:
+	# 声誉 → [染色, 强度]；健康带内 [白, 0] 不上色（见常量注释）。
+	if rep < REP_FLOOR:
+		return [REP_RED, clampf((REP_FLOOR - rep) / (REP_FLOOR - 0.38), 0.0, 1.0) * REP_RED_AMT]
+	if rep > REP_CEIL:
+		return [REP_GREEN, clampf((rep - REP_CEIL) / (1.0 - REP_CEIL), 0.0, 1.0) * REP_GREEN_AMT]
+	return [Color.WHITE, 0.0]
+
+func _apply_area_reputation() -> void:
+	# 区域声誉 → 楼群材质染色；纯装饰道路（area_active = 0）跳过。
+	var ids: PackedStringArray = sim.area_ids()
+	var active: PackedByteArray = sim.area_active()
+	var states: PackedFloat32Array = sim.area_states()
+	for i in ids.size():
+		if i < active.size() and active[i] == 0:
+			continue
+		var rep: float = states[i * 2]
+		if absf(rep - float(area_rep_last.get(ids[i], -1.0))) < 0.005:
+			continue
+		area_rep_last[ids[i]] = rep
+		var mats: Array = area_mats.get(ids[i], [])
+		var tint := _rep_tint(rep)
+		var col := _v3(tint[0])
+		for m in mats:
+			m.set_shader_parameter("rep_color", col)
+			m.set_shader_parameter("rep_amt", tint[1])
+
+func _build_selection_ring() -> void:
+	# 选中者脚下光环（亮黄圆环），每帧贴视觉位置。
+	var torus := TorusMesh.new()
+	torus.inner_radius = 0.34
+	torus.outer_radius = 0.52
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/toon_flat.gdshader")
+	mat.set_shader_parameter("albedo", Vector3(1.0, 0.8, 0.25))
+	sel_ring = MeshInstance3D.new()
+	sel_ring.mesh = torus
+	sel_ring.material_override = mat
+	sel_ring.visible = false
+	add_child(sel_ring)
 
 func _person_mesh() -> ArrayMesh:
 	# 小人 = 胶囊身体 + 球头（一个 ArrayMesh，MultiMesh 单网格纪律）。
@@ -296,6 +462,37 @@ func _build_ui() -> void:
 		btn.text = ("⏸" if speed == 0 else "×%d" % speed)
 		btn.pressed.connect(func(): sim.set_speed_mult(float(speed)))
 		hbox.add_child(btn)
+	var hint := Label.new()
+	hint.add_theme_font_size_override("font_size", 14)
+	hint.modulate = Color(1.0, 1.0, 1.0, 0.62)
+	hint.text = "  点居民看详情 · 楼色随区域声誉"
+	hbox.add_child(hint)
+	# 旁观检查面板（M6 移植）：右侧常驻，点选后显示公开信息 + 密友内心。
+	inspect_panel = PanelContainer.new()
+	inspect_panel.anchor_left = 1.0
+	inspect_panel.anchor_right = 1.0
+	inspect_panel.anchor_top = 0.0
+	inspect_panel.anchor_bottom = 1.0
+	inspect_panel.offset_left = -352.0
+	inspect_panel.offset_right = -16.0
+	inspect_panel.offset_top = 72.0
+	inspect_panel.offset_bottom = -16.0
+	var vb := VBoxContainer.new()
+	inspect_title = Label.new()
+	inspect_title.add_theme_font_size_override("font_size", 18)
+	inspect_title.text = "点击一位居民看看"
+	vb.add_child(inspect_title)
+	follow_btn = Button.new()
+	follow_btn.text = "跟随镜头：关"
+	follow_btn.pressed.connect(_toggle_follow)
+	vb.add_child(follow_btn)
+	inspect_body = RichTextLabel.new()
+	inspect_body.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	inspect_body.add_theme_font_size_override("normal_font_size", 15)
+	inspect_body.append_text("（旁观模式：[b]表面[/b]人人可见——在做什么、在哪里；需求与内心只有 [b]自己或密友[/b] 能看到。）")
+	vb.add_child(inspect_body)
+	inspect_panel.add_child(vb)
+	canvas.add_child(inspect_panel)
 	if detail_on:
 		for m in fx_mats:
 			m.set_shader_parameter("windows_on", true)
@@ -340,10 +537,24 @@ func _process(delta: float) -> void:
 		var basis := Basis().scaled(Vector3(sc, sc, sc))
 		mm.set_instance_transform(i, Transform3D(basis, vp))
 		mm.set_instance_color(i, Color(0.35, 0.45, 0.65) if sp == 1 else Color(1.0, 0.7, 0.3))
+	# 选中光环贴住选中者的视觉位置（相机不管怎么转都在脚下）
+	if selected >= 0 and selected < visual_pos.size():
+		sel_ring.visible = true
+		sel_ring.position = Vector3(visual_pos[selected].x, 0.06, visual_pos[selected].z)
+	elif sel_ring != null:
+		sel_ring.visible = false
+	# 跟随镜头：注视点贴向选中者的地面位置（平移/旋转手动操作会结束跟随）
+	if follow and selected >= 0 and selected < visual_pos.size():
+		focus = focus.lerp(
+			Vector3(visual_pos[selected].x, 0.0, visual_pos[selected].z), minf(delta * 3.0, 1.0))
+		_clamp_focus()
+		_apply_camera()
 	ui_timer += delta
 	if ui_timer >= 0.5:
 		ui_timer = 0.0
 		clock_label.text = sim.clock_text()
+		_apply_area_reputation()
+		_refresh_inspect()
 
 func _resize_agents(n: int) -> void:
 	# 居民数变化（新生儿/离场后重进）：重建实例，新增者直接就位（不全场滑動）。
