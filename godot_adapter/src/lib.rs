@@ -450,6 +450,35 @@ impl SimNode {
         out
     }
 
+    /// 代理当前钱包（经济 M5：工资入账、消费扣款、犯罪转移都在这里）。
+    #[func]
+    fn agent_wallet(&self, idx: i64) -> f64 {
+        self.sim
+            .as_ref()
+            .and_then(|s| s.agents.get(idx.max(0) as usize))
+            .map(|a| a.wallet)
+            .unwrap_or(0.0)
+    }
+
+    /// 小镇动态流（3D 客户端日志区）：居民动作 + 经济 + 治安 + 关系 + 环境事件。
+    /// 每次调用消费缓冲，行格式 "类别\t文字"；类别驱动客户端着色。
+    /// 遥测类事件（决策因素/快照/记忆写入等）不进流——那是 viewer 的活。
+    #[func]
+    fn drain_town_feed(&mut self) -> PackedStringArray {
+        let mut out = PackedStringArray::new();
+        let Some(sim) = self.sim.as_mut() else {
+            return out;
+        };
+        sim.collect_recent = true;
+        let events: Vec<living_core::LogEvent> = sim.recent_events.drain(..).collect();
+        for ev in events {
+            if let Some((cat, text)) = town_feed_line(sim, ev) {
+                out.push(format!("{cat}\t{text}").as_str());
+            }
+        }
+        out
+    }
+
     /// 累计决策数（性能自检）。
     #[func]
     fn decisions_done(&self) -> i64 {
@@ -462,4 +491,151 @@ impl SimNode {
 
 fn describe(tick: living_core::Tick, event: &str) -> String {
     format!("{}【{}】", living_core::time::format_clock(tick), event)
+}
+
+// ---------- 小镇动态流格式化 ----------
+
+fn feed_name(sim: &World, id: u32) -> &str {
+    sim.agents
+        .get(id as usize)
+        .map(|a| a.name.as_str())
+        .unwrap_or("?")
+}
+
+fn feed_behavior(sim: &World, id: &str) -> String {
+    sim.cfg
+        .behaviors
+        .iter()
+        .find(|b| b.id == id)
+        .map(|b| b.display_name().to_string())
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn feed_action(sim: &World, behavior: &str, variant: Option<&str>) -> String {
+    let v = variant
+        .and_then(|v| {
+            sim.cfg
+                .behaviors
+                .iter()
+                .find(|b| b.id == behavior)
+                .and_then(|b| b.variants.iter().find(|x| x.id == v))
+                .map(|x| x.display_name().to_string())
+        })
+        .map(|n| format!("（{n}）"))
+        .unwrap_or_default();
+    format!("{}{v}", feed_behavior(sim, behavior))
+}
+
+/// 一条事件 → (类别, 文字)；None = 不进流。
+fn town_feed_line(sim: &World, ev: living_core::LogEvent) -> Option<(&'static str, String)> {
+    use living_core::LogEvent;
+    let clock = living_core::time::format_clock;
+    match ev {
+        LogEvent::ActionStart {
+            tick,
+            agent,
+            behavior,
+            variant,
+            ..
+        } => Some((
+            "act",
+            format!("{} {} 开始 {}", clock(tick), feed_name(sim, agent), feed_action(sim, &behavior, variant.as_deref())),
+        )),
+        LogEvent::Wallet {
+            tick, agent, delta, value,
+        } => Some((
+            "money",
+            format!(
+                "{} {} {}¥{:.0}（余 ¥{:.0}）",
+                clock(tick),
+                feed_name(sim, agent),
+                if delta >= 0.0 { "入账" } else { "消费" },
+                delta.abs(),
+                value
+            ),
+        )),
+        LogEvent::Theft {
+            tick, thief, victim, amount, caught, area,
+        } => {
+            let area_name = sim
+                .cfg
+                .areas
+                .iter()
+                .find(|a| a.id == area)
+                .map(|a| a.display_name().to_string())
+                .unwrap_or(area);
+            Some((
+                "crime",
+                if caught {
+                    format!("{} {} 扒窃 {} ¥{:.0} 被抓住了（{}）", clock(tick), feed_name(sim, thief), feed_name(sim, victim), amount, area_name)
+                } else {
+                    format!("{} {} 扒窃了 {} ¥{:.0}（{}）", clock(tick), feed_name(sim, thief), feed_name(sim, victim), amount, area_name)
+                },
+            ))
+        }
+        LogEvent::JobChange { tick, agent, from, to, reason } => Some((
+            "job",
+            format!(
+                "{} {} 职业：{} → {}（{}）",
+                clock(tick),
+                feed_name(sim, agent),
+                from.as_deref().unwrap_or("无业"),
+                to.as_deref().unwrap_or("无业"),
+                reason
+            ),
+        )),
+        LogEvent::Couple { tick, a, b, started } => Some((
+            "town",
+            if started {
+                format!("{} 💕 {} 和 {} 成了一对", clock(tick), feed_name(sim, a), feed_name(sim, b))
+            } else {
+                format!("{} {} 和 {} 分手了", clock(tick), feed_name(sim, a), feed_name(sim, b))
+            },
+        )),
+        LogEvent::Born { tick, agent, mother, father } => Some((
+            "town",
+            format!("{} 👶 {} 出生（{} 和 {} 的孩子）", clock(tick), feed_name(sim, agent), feed_name(sim, mother), feed_name(sim, father)),
+        )),
+        LogEvent::Depart { tick, agent, reason, age_days } => Some((
+            "town",
+            format!("{} 🧳 {} 离开了小镇（{}，{:.0} 岁）", clock(tick), feed_name(sim, agent), reason, age_days / 365.0),
+        )),
+        LogEvent::Imitate { tick, observer, from, behavior, variant } => Some((
+            "town",
+            format!("{} {} 看 {} 做{}，自己也想试试", clock(tick), feed_name(sim, observer), feed_name(sim, from), feed_action(sim, &behavior, variant.as_deref())),
+        )),
+        LogEvent::EnvEvent { tick, event, .. } => Some(("env", format!("{} 🌍 {}", clock(tick), event))),
+        LogEvent::Startled { tick, agent, event } => Some((
+            "env",
+            format!("{} 😱 {} 被【{}】吓了一跳", clock(tick), feed_name(sim, agent), event),
+        )),
+        LogEvent::ReputationChange { tick, area, experience, value } => Some((
+            "rep",
+            format!("{} {} 口碑 {} → {:.2}", clock(tick), area, if experience >= 0.0 { "回升" } else { "受损" }, value),
+        )),
+        LogEvent::PlayerCommand { tick, agent, behavior, cost, accepted, reason } => Some((
+            "cmd",
+            format!(
+                "{} 📋 指令 {}：{}（{}）{}",
+                clock(tick),
+                feed_name(sim, agent),
+                feed_behavior(sim, &behavior),
+                if accepted { format!("意志力 −{cost:.0}") } else { "被拒绝".into() },
+                reason
+            ),
+        )),
+        LogEvent::GoalSet { tick, agent, behavior, deadline } => Some((
+            "goal",
+            format!("{} {} 立了目标：戒 {}（到 {}）", clock(tick), feed_name(sim, agent), feed_behavior(sim, &behavior), clock(deadline)),
+        )),
+        LogEvent::GoalViolation { tick, agent, behavior, commanded } => Some((
+            "goal",
+            format!("{} {} 的戒{}目标{}",
+                clock(tick),
+                feed_name(sim, agent),
+                feed_behavior(sim, &behavior),
+                if commanded { "被玩家下令打破" } else { "失守了" }),
+        )),
+        _ => None,
+    }
 }

@@ -69,6 +69,15 @@ var cmd_feedback: Label
 var cmd_scroll: ScrollContainer
 var cmd_box: VBoxContainer
 var last_menu := ""           # 上次菜单内容（没变不重建按钮）
+# 小镇日志区（左下角）：居民动作 + 经济 + 治安 + 关系 + 事件（类别着色）。
+var feed_text: RichTextLabel
+var feed_lines: Array[String] = []
+const FEED_MAX := 150         # 滚动保留行数（缓冲区外的事件不追）
+const FEED_COLORS := {
+	"act": "#c9d4e0", "money": "#a8e6a3", "crime": "#ff8a80", "job": "#8ec9ff",
+	"town": "#d9b8ff", "env": "#bfe3ff", "rep": "#ffc37a", "goal": "#e0b0ff",
+	"cmd": "#ffe08a",
+}
 # 视觉平滑：核心里"位置由行为决定"（开始行为即就位，路上时间不建模），
 # 表现层用指数趋近把跳变抹成连续滑动——核心语义与确定性不动。
 var visual_pos := PackedVector3Array()
@@ -380,7 +389,8 @@ func _refresh_inspect() -> void:
 	if brief.size() >= 5:
 		inspect_title.text = "%s（%s · %s）" % [brief[0], brief[1], brief[2]]
 		inspect_body.clear()
-		inspect_body.append_text("正在：%s\n地点：%s\n" % [brief[3], brief[4]])
+		inspect_body.append_text("正在：%s\n地点：%s\n钱包：¥%.0f\n" % [brief[3], brief[4],
+			sim.agent_wallet(selected)])
 		for line in sim.agent_deep(selected):
 			inspect_body.append_text(line + "\n")
 	elif brief.size() >= 3:
@@ -411,7 +421,7 @@ func _refresh_commands() -> void:
 		return
 	_set_command_ui_visible(true)
 	var wp: float = sim.agent_willpower(player_idx)
-	will_label.text = "意志力 %.0f / 100" % wp
+	will_label.text = "意志力 %.0f / 100 · 钱包 ¥%.0f" % [wp, sim.agent_wallet(player_idx)]
 	var flat: PackedStringArray = sim.behaviors_status(player_idx)
 	var joined := "|".join(flat)
 	if joined == last_menu:
@@ -443,6 +453,21 @@ func _select_player() -> void:
 	selected = player_idx
 	_refresh_inspect()
 	_refresh_commands()
+
+func _poll_town_feed() -> void:
+	# 小镇日志：核心动态流（"类别\t文字"）→ 着色滚动区，只保留末尾 FEED_MAX 行。
+	var feed: PackedStringArray = sim.drain_town_feed()
+	if feed.size() == 0:
+		return
+	for line in feed:
+		var tab := line.find("\t")
+		var cat := line.substr(0, tab) if tab > 0 else "act"
+		var body := line.substr(tab + 1) if tab > 0 else line
+		feed_lines.push_back("[color=%s]%s[/color]" % [FEED_COLORS.get(cat, "#c9d4e0"), body])
+	while feed_lines.size() > FEED_MAX:
+		feed_lines.pop_front()
+	feed_text.clear()
+	feed_text.append_text("\n".join(feed_lines))
 
 func _issue(behavior_id: String) -> void:
 	var r: PackedStringArray = sim.issue_command(player_idx, behavior_id)
@@ -600,6 +625,29 @@ func _build_ui() -> void:
 	_set_command_ui_visible(false)
 	inspect_panel.add_child(vb)
 	canvas.add_child(inspect_panel)
+	# 小镇日志区（左下角）：滚动跟随最新；上翻即停止跟随（RichTextLabel 自带）。
+	var fpanel := PanelContainer.new()
+	fpanel.anchor_left = 0.0
+	fpanel.anchor_top = 1.0
+	fpanel.anchor_right = 0.0
+	fpanel.anchor_bottom = 1.0
+	fpanel.offset_left = 12.0
+	fpanel.offset_top = -252.0
+	fpanel.offset_right = 648.0
+	fpanel.offset_bottom = -12.0
+	var fv := VBoxContainer.new()
+	var fhead := Label.new()
+	fhead.add_theme_font_size_override("font_size", 15)
+	fhead.text = "小镇日志（动作 · 经济 · 事件）"
+	fv.add_child(fhead)
+	feed_text = RichTextLabel.new()
+	feed_text.bbcode_enabled = true
+	feed_text.scroll_following = true
+	feed_text.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	feed_text.add_theme_font_size_override("normal_font_size", 13)
+	fv.add_child(feed_text)
+	fpanel.add_child(fv)
+	canvas.add_child(fpanel)
 	if detail_on:
 		for m in fx_mats:
 			m.set_shader_parameter("windows_on", true)
@@ -666,6 +714,7 @@ func _process(delta: float) -> void:
 		_apply_area_reputation()
 		_refresh_inspect()
 		_refresh_commands()
+		_poll_town_feed()
 		if issue_debug != "":
 			# --issue=行为id（自检）：给玩家自动下一条指令，看反馈与意志力结算。
 			_issue(issue_debug)
