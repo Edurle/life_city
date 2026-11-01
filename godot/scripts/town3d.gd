@@ -16,6 +16,10 @@ var sim: SimNode
 var mm: MultiMesh
 var camera: Camera3D
 var dragging := false
+# 相机锚定：注视的地面点（y=0）+ 恒定机位偏移（旋转锁死 → 偏移不变）。
+# 平移/缩放只动 focus（钳制在小镇附近），机位永远 = focus + 偏移，不会跳变。
+var focus := Vector3(0.0, 0.0, 1.0)
+var cam_offset := Vector3.ZERO
 var clock_label: Label
 var ui_timer := 0.0
 var screenshot_after := -1.0
@@ -166,6 +170,16 @@ func _build_camera() -> void:
 	camera.position = Vector3(44.8, 70.9, 101.6)
 	camera.look_at(Vector3(0.0, 4.0, 1.0))
 	camera.make_current()
+	focus = Vector3(0.0, 0.0, 1.0)
+	cam_offset = camera.position - focus
+
+func _clamp_focus() -> void:
+	# 注视点钳制在地图（56×36，中心原点）外扩 8 米内
+	focus.x = clampf(focus.x, -36.0, 36.0)
+	focus.z = clampf(focus.z, -26.0, 26.0)
+
+func _apply_camera() -> void:
+	camera.position = focus + cam_offset
 
 func _ground_point(screen_px: Vector2) -> Vector3:
 	# 视线与地面(y=0)交点；指向天空时返回 INF
@@ -182,17 +196,17 @@ func _pan(rel: Vector2) -> void:
 	var fwd := -basis.z
 	fwd.y = 0.0
 	fwd = fwd.normalized()
-	camera.position += -basis.x * rel.x * spp + fwd * rel.y * spp
-	camera.position.x = clampf(camera.position.x, -36.0, 36.0)
-	camera.position.z = clampf(camera.position.z, -28.0, 32.0)
+	focus += -basis.x * rel.x * spp + fwd * rel.y * spp
+	_clamp_focus()
+	_apply_camera()
 
 func _zoom_at(screen_px: Vector2, factor: float) -> void:
 	var anchor := _ground_point(screen_px)
 	camera.size = clampf(camera.size * factor, 10.0, 90.0)
 	if anchor.is_finite():
-		camera.position += anchor - _ground_point(screen_px)
-		camera.position.x = clampf(camera.position.x, -36.0, 36.0)
-		camera.position.z = clampf(camera.position.z, -28.0, 32.0)
+		focus += anchor - _ground_point(screen_px)
+	_clamp_focus()
+	_apply_camera()
 
 func _unhandled_input(event: InputEvent) -> void:
 	if camera == null:
