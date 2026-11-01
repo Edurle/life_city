@@ -20,20 +20,17 @@ var dragging := false
 # 平移/缩放只动 focus（钳制在小镇附近），机位永远 = focus + 偏移，不会跳变。
 var focus := Vector3(0.0, 0.0, 1.0)
 var cam_offset := Vector3.ZERO
-# 90° 步进旋转（Q/E）：机位偏移与太阳方向一起绕 Y 轴转——
-# 光照永远在画面同一侧，四个朝向都不会背光（卡通光影保持）。
+# 90° 步进旋转（Q/E）：只转机位偏移；光照固定在世界空间。
 const BASE_OFFSET := Vector3(44.8, 70.9, 100.6)
-const SUN_DIR0 := Vector3(0.4523, 1.2798, 0.6483)   # (0.30,0.85,0.43) 归一化
 var cam_yaw := 0
 var cam_offset_tgt := Vector3.ZERO
-var toon_mats: Array[ShaderMaterial] = []
-var fx_mats: Array[ShaderMaterial] = []
-var sun_node: DirectionalLight3D
+var fx_mats: Array[ShaderMaterial] = []    # 立面材质（--detail 开窗户）
+var st_mats: Array[ShaderMaterial] = []    # 标线材质（--detail 开标线）
 var clock_label: Label
 var ui_timer := 0.0
 var screenshot_after := -1.0
 var no_toon := false          # --no-toon：直接用 GLB 自带烘焙贴图（外部查看器视角）
-var windows_on := false       # --windows：立面窗户/店面图案（默认纯色模式）
+var detail_on := false        # --detail：程序化细节（立面窗户/店面 + 路面标线；默认纯色模式）
 var agent_count := 0
 var species_bytes := PackedByteArray()
 # 视觉平滑：核心里"位置由行为决定"（开始行为即就位，路上时间不建模），
@@ -57,8 +54,8 @@ func _ready() -> void:
 			screenshot_after = arg.substr(19).to_float()
 		elif arg == "--no-toon":
 			no_toon = true
-		elif arg == "--windows":
-			windows_on = true
+		elif arg == "--detail":
+			detail_on = true
 	if screenshot_after > 0.0:
 		get_window().size = Vector2i(1920, 1080)
 	sim.start(42, cfg_path, 14, 3)
@@ -96,7 +93,6 @@ func _build_environment() -> void:
 	sun.light_energy = 1.05 if no_toon else 1.8
 	sun.shadow_enabled = true
 	add_child(sun)
-	sun_node = sun
 	var from_dir := Vector3(0.30, 0.85, 0.43).normalized()
 	sun.position = from_dir * 140.0
 	sun.look_at(Vector3.ZERO)
@@ -130,10 +126,7 @@ func _v3(c: Color) -> Vector3:
 
 func _toon_mat(m: Material, fs: Shader, xs: Shader, ss: Shader) -> ShaderMaterial:
 	var nm := _base_name(m.resource_name)
-	var _m := _toon_mat_inner(m, fs, xs, ss)
-	if _m != null:
-		toon_mats.push_back(_m)
-	return _m
+	return _toon_mat_inner(m, fs, xs, ss)
 
 func _toon_mat_inner(m: Material, fs: Shader, xs: Shader, ss: Shader) -> ShaderMaterial:
 	var nm := _base_name(m.resource_name)
@@ -165,6 +158,7 @@ func _toon_mat_inner(m: Material, fs: Shader, xs: Shader, ss: Shader) -> ShaderM
 		sm.set_shader_parameter("duty", p[3].to_float())
 		sm.set_shader_parameter("on_color", _v3(Color(p[4])))
 		sm.set_shader_parameter("off_color", _v3(Color(p[5])))
+		st_mats.push_back(sm)
 		return sm
 	return null
 
@@ -205,15 +199,9 @@ func _apply_camera() -> void:
 	camera.look_at(focus + Vector3(0.0, 4.0, 0.0))
 
 func _rotate_view(dir: int) -> void:
+	# 光照固定在世界空间（不随视角转）——转到背面看到的就是真实的背光面。
 	cam_yaw += dir
 	cam_offset_tgt = BASE_OFFSET.rotated(Vector3.UP, cam_yaw * (PI / 2.0))
-	# 光照跟随：材质里的太阳方向 + 场景灯一起转
-	var sd := SUN_DIR0.rotated(Vector3.UP, cam_yaw * (PI / 2.0))
-	for m in toon_mats:
-		m.set_shader_parameter("sun_dir", sd)
-	if sun_node:
-		sun_node.position = sd * 140.0
-		sun_node.look_at(Vector3.ZERO)
 
 func _ground_point(screen_px: Vector2) -> Vector3:
 	# 视线与地面(y=0)交点；指向天空时返回 INF
@@ -288,7 +276,6 @@ func _build_agents() -> void:
 	mat.shader = load("res://shaders/toon_flat.gdshader")
 	mat.set_shader_parameter("albedo", Vector3.ONE)
 	mmi.material_override = mat
-	toon_mats.push_back(mat)
 	add_child(mmi)
 
 func _build_ui() -> void:
@@ -309,9 +296,11 @@ func _build_ui() -> void:
 		btn.text = ("⏸" if speed == 0 else "×%d" % speed)
 		btn.pressed.connect(func(): sim.set_speed_mult(float(speed)))
 		hbox.add_child(btn)
-	if windows_on:
+	if detail_on:
 		for m in fx_mats:
 			m.set_shader_parameter("windows_on", true)
+		for m in st_mats:
+			m.set_shader_parameter("stripes_on", true)
 	sim.set_speed_mult(100.0 if screenshot_after > 0.0 else 1.0)
 
 func _process(delta: float) -> void:
