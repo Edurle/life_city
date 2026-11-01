@@ -20,6 +20,14 @@ var dragging := false
 # 平移/缩放只动 focus（钳制在小镇附近），机位永远 = focus + 偏移，不会跳变。
 var focus := Vector3(0.0, 0.0, 1.0)
 var cam_offset := Vector3.ZERO
+# 90° 步进旋转（Q/E）：机位偏移与太阳方向一起绕 Y 轴转——
+# 光照永远在画面同一侧，四个朝向都不会背光（卡通光影保持）。
+const BASE_OFFSET := Vector3(44.8, 70.9, 100.6)
+const SUN_DIR0 := Vector3(0.4523, 1.2798, 0.6483)   # (0.30,0.85,0.43) 归一化
+var cam_yaw := 0
+var cam_offset_tgt := Vector3.ZERO
+var toon_mats: Array[ShaderMaterial] = []
+var sun_node: DirectionalLight3D
 var clock_label: Label
 var ui_timer := 0.0
 var screenshot_after := -1.0
@@ -84,6 +92,7 @@ func _build_environment() -> void:
 	sun.light_energy = 1.05 if no_toon else 1.8
 	sun.shadow_enabled = true
 	add_child(sun)
+	sun_node = sun
 	var from_dir := Vector3(0.30, 0.85, 0.43).normalized()
 	sun.position = from_dir * 140.0
 	sun.look_at(Vector3.ZERO)
@@ -116,6 +125,13 @@ func _v3(c: Color) -> Vector3:
 	return Vector3(c.r, c.g, c.b)
 
 func _toon_mat(m: Material, fs: Shader, xs: Shader, ss: Shader) -> ShaderMaterial:
+	var nm := _base_name(m.resource_name)
+	var _m := _toon_mat_inner(m, fs, xs, ss)
+	if _m != null:
+		toon_mats.push_back(_m)
+	return _m
+
+func _toon_mat_inner(m: Material, fs: Shader, xs: Shader, ss: Shader) -> ShaderMaterial:
 	var nm := _base_name(m.resource_name)
 	if nm.begins_with("flat|#"):
 		var sm := ShaderMaterial.new()
@@ -171,7 +187,8 @@ func _build_camera() -> void:
 	camera.look_at(Vector3(0.0, 4.0, 1.0))
 	camera.make_current()
 	focus = Vector3(0.0, 0.0, 1.0)
-	cam_offset = camera.position - focus
+	cam_offset = BASE_OFFSET
+	cam_offset_tgt = BASE_OFFSET
 
 func _clamp_focus() -> void:
 	# 注视点钳制在地图（56×36，中心原点）外扩 8 米内
@@ -180,6 +197,18 @@ func _clamp_focus() -> void:
 
 func _apply_camera() -> void:
 	camera.position = focus + cam_offset
+	camera.look_at(focus + Vector3(0.0, 4.0, 0.0))
+
+func _rotate_view(dir: int) -> void:
+	cam_yaw += dir
+	cam_offset_tgt = BASE_OFFSET.rotated(Vector3.UP, cam_yaw * (PI / 2.0))
+	# 光照跟随：材质里的太阳方向 + 场景灯一起转
+	var sd := SUN_DIR0.rotated(Vector3.UP, cam_yaw * (PI / 2.0))
+	for m in toon_mats:
+		m.set_shader_parameter("sun_dir", sd)
+	if sun_node:
+		sun_node.position = sd * 140.0
+		sun_node.look_at(Vector3.ZERO)
 
 func _ground_point(screen_px: Vector2) -> Vector3:
 	# 视线与地面(y=0)交点；指向天空时返回 INF
@@ -221,6 +250,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			_zoom_at(mb.position, 1.0 / 0.85)
 	elif event is InputEventMouseMotion and dragging:
 		_pan((event as InputEventMouseMotion).relative)
+	elif event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_Q:
+			_rotate_view(1)
+		elif event.keycode == KEY_E:
+			_rotate_view(-1)
 
 func _person_mesh() -> ArrayMesh:
 	# 小人 = 胶囊身体 + 球头（一个 ArrayMesh，MultiMesh 单网格纪律）。
@@ -249,6 +283,7 @@ func _build_agents() -> void:
 	mat.shader = load("res://shaders/toon_flat.gdshader")
 	mat.set_shader_parameter("albedo", Vector3.ONE)
 	mmi.material_override = mat
+	toon_mats.push_back(mat)
 	add_child(mmi)
 
 func _build_ui() -> void:
@@ -281,6 +316,12 @@ func _process(delta: float) -> void:
 				- (1.0 if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN) else 0.0))
 		if rel != Vector2.ZERO:
 			_pan(rel.normalized() * 420.0 * delta)
+	# 90° 步进旋转动画
+	if cam_offset.distance_squared_to(cam_offset_tgt) > 0.01:
+		cam_offset = cam_offset.slerp(cam_offset_tgt, minf(delta * 8.0, 1.0))
+		if cam_offset.distance_squared_to(cam_offset_tgt) < 0.01:
+			cam_offset = cam_offset_tgt
+		_apply_camera()
 	if screenshot_after > 0.0:
 		screenshot_after -= delta
 		if screenshot_after <= 0.0:
