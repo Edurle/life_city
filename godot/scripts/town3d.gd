@@ -438,6 +438,12 @@ func _refresh_commands() -> void:
 		btn.pressed.connect(_issue.bind(id))
 		cmd_box.add_child(btn)
 
+func _select_player() -> void:
+	# 顶栏"我：xxx"按钮：与点击金色小人同效（选中 + 面板 + 指令区）。
+	selected = player_idx
+	_refresh_inspect()
+	_refresh_commands()
+
 func _issue(behavior_id: String) -> void:
 	var r: PackedStringArray = sim.issue_command(player_idx, behavior_id)
 	if r.size() < 3:
@@ -541,6 +547,11 @@ func _build_ui() -> void:
 		btn.text = ("⏸" if speed == 0 else "×%d" % speed)
 		btn.pressed.connect(func(): sim.set_speed_mult(float(speed)))
 		hbox.add_child(btn)
+	# 一键选中自己（与点击金色小人同效）——玩家在楼里上班点不到时也能下指令。
+	var me_btn := Button.new()
+	me_btn.text = "我：%s" % player_name
+	me_btn.pressed.connect(_select_player)
+	hbox.add_child(me_btn)
 	var hint := Label.new()
 	hint.add_theme_font_size_override("font_size", 14)
 	hint.modulate = Color(1.0, 1.0, 1.0, 0.62)
