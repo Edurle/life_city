@@ -14,6 +14,8 @@ const AREA_FILES := [
 
 var sim: SimNode
 var mm: MultiMesh
+var camera: Camera3D
+var dragging := false
 var clock_label: Label
 var ui_timer := 0.0
 var screenshot_after := -1.0
@@ -155,14 +157,56 @@ func _retint(node: Node, fs: Shader, xs: Shader, ss: Shader) -> void:
 		_retint(c, fs, xs, ss)
 
 func _build_camera() -> void:
-	# 正交 31° 斜俯视、方位角斜转 25°——与 Blender 验证机位一致（锁旋转，平移缩放自由）。
-	var cam := Camera3D.new()
-	cam.projection = Camera3D.PROJECTION_ORTHOGONAL
-	cam.size = 42.0
-	add_child(cam)
-	cam.position = Vector3(44.8, 70.9, 101.6)
-	cam.look_at(Vector3(0.0, 4.0, 1.0))
-	cam.make_current()
+	# 正交 31° 斜俯视、方位角斜转 25°——与 Blender 验证机位一致（旋转锁定）。
+	# 平移/缩放见 _unhandled_input：拖拽抓地平移、滚轮锚定光标缩放、WASD/方向键。
+	camera = Camera3D.new()
+	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
+	camera.size = 42.0
+	add_child(camera)
+	camera.position = Vector3(44.8, 70.9, 101.6)
+	camera.look_at(Vector3(0.0, 4.0, 1.0))
+	camera.make_current()
+
+func _ground_point(screen_px: Vector2) -> Vector3:
+	# 视线与地面(y=0)交点；指向天空时返回 INF
+	var o := camera.project_ray_origin(screen_px)
+	var d := camera.project_ray_normal(screen_px)
+	if absf(d.y) < 1e-4:
+		return Vector3.INF
+	return o + d * (-o.y / d.y)
+
+func _pan(rel: Vector2) -> void:
+	# 像素位移 → 世界位移（抓地：内容跟手，相机反向/纵向移动）
+	var spp := camera.size / get_viewport().get_visible_rect().size.y
+	var basis := camera.global_transform.basis
+	var fwd := -basis.z
+	fwd.y = 0.0
+	fwd = fwd.normalized()
+	camera.position += -basis.x * rel.x * spp + fwd * rel.y * spp
+	camera.position.x = clampf(camera.position.x, -36.0, 36.0)
+	camera.position.z = clampf(camera.position.z, -28.0, 32.0)
+
+func _zoom_at(screen_px: Vector2, factor: float) -> void:
+	var anchor := _ground_point(screen_px)
+	camera.size = clampf(camera.size * factor, 10.0, 90.0)
+	if anchor.is_finite():
+		camera.position += anchor - _ground_point(screen_px)
+		camera.position.x = clampf(camera.position.x, -36.0, 36.0)
+		camera.position.z = clampf(camera.position.z, -28.0, 32.0)
+
+func _unhandled_input(event: InputEvent) -> void:
+	if camera == null:
+		return
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT or mb.button_index == MOUSE_BUTTON_MIDDLE:
+			dragging = mb.pressed
+		elif mb.pressed and mb.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_zoom_at(mb.position, 0.85)
+		elif mb.pressed and mb.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_zoom_at(mb.position, 1.0 / 0.85)
+	elif event is InputEventMouseMotion and dragging:
+		_pan((event as InputEventMouseMotion).relative)
 
 func _person_mesh() -> ArrayMesh:
 	# 小人 = 胶囊身体 + 球头（一个 ArrayMesh，MultiMesh 单网格纪律）。
@@ -214,6 +258,15 @@ func _build_ui() -> void:
 	sim.set_speed_mult(100.0 if screenshot_after > 0.0 else 1.0)
 
 func _process(delta: float) -> void:
+	# 键盘平移（WASD / 方向键）
+	if camera != null:
+		var rel := Vector2(
+			(1.0 if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT) else 0.0)
+				- (1.0 if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT) else 0.0),
+			(1.0 if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP) else 0.0)
+				- (1.0 if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN) else 0.0))
+		if rel != Vector2.ZERO:
+			_pan(rel.normalized() * 420.0 * delta)
 	if screenshot_after > 0.0:
 		screenshot_after -= delta
 		if screenshot_after <= 0.0:
