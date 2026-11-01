@@ -16,6 +16,8 @@ pub const STREAM_INDIVIDUAL: u8 = 1;
 /// M5 人格轴（诚实度）专用流：新增抽样不扰动既有序列（旧存档/旧日志的
 /// 决策轨迹不受影响）。
 pub const STREAM_PERSONALITY: u8 = 3;
+/// 开局精力抽样流（M8）：同上——独立于既有属性序列，配置缺省时零扰动。
+pub const STREAM_ENERGY: u8 = 4;
 
 fn d_species_cat() -> String {
     "cat".to_string()
@@ -186,6 +188,15 @@ impl Agent {
         };
         // 诚实度从独立子流抽取（不打扰既有属性序列）。
         let honesty = Rng::seeded(derive_seed(world_seed, id, STREAM_PERSONALITY)).next_f64();
+        // 开局精力随机化（M8）：第一夜有人早睡有人熬夜，小镇作息天然错开。
+        // 同样独立子流；缺省（min == max）不抽样，行为与旧版完全一致。
+        let energy = if params.init_energy_max > params.init_energy_min + 1e-9 {
+            Rng::seeded(derive_seed(world_seed, id, STREAM_ENERGY))
+                .uniform(params.init_energy_min, params.init_energy_max)
+                .clamp(0.0, 100.0)
+        } else {
+            params.init_energy_min
+        };
         let mut weights = BTreeMap::new();
         let mut base_weights = BTreeMap::new();
         for (bid, base) in behaviors {
@@ -229,7 +240,11 @@ impl Agent {
             wallet: if parents.is_some() { 0.0 } else { d_wallet() },
             salary_day: 0,
             job: None,
-            needs: Needs::full(),
+            needs: {
+                let mut n = Needs::full();
+                n.energy = energy;
+                n
+            },
             willpower: 100.0,
             pending_command: None,
             weights,

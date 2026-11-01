@@ -345,6 +345,47 @@ fn interrupting_costs_extra_willpower() {
     assert!(out_idle.accepted);
 }
 
+// ---------- M8：开局精力随机化（第一夜作息错开） ----------
+
+#[test]
+fn init_energy_randomized_in_range() {
+    // 配置了范围：全员落在范围内且明显分散；缺省：全员满精力（旧版行为）。
+    let json = test_config(false).replace(
+        "\"novelty_mult\": 0.15, \"novelty_gain\": 0.02",
+        "\"novelty_mult\": 0.15, \"novelty_gain\": 0.02,\n      \"init_energy_min\": 30, \"init_energy_max\": 80",
+    );
+    let w = World::new(
+        load_config(&json).unwrap(),
+        42,
+        cat_roster(cat_names(12)),
+        true,
+    );
+    let es: Vec<f64> = w.agents.iter().map(|a| a.needs.energy).collect();
+    assert!(
+        es.iter().all(|e| (30.0..=80.0).contains(e)),
+        "初始精力应全部在 30..80：{es:?}"
+    );
+    let spread = es.iter().cloned().fold(f64::MIN, f64::max) - es.iter().cloned().fold(f64::MAX, f64::min);
+    assert!(spread > 10.0, "12 名代理的初始精力应明显分散：{es:?}");
+    // 同种子重放：字节级一致（随机化走代理自己的子流）。
+    let w2 = World::new(
+        load_config(&json).unwrap(),
+        42,
+        cat_roster(cat_names(12)),
+        true,
+    );
+    let es2: Vec<f64> = w2.agents.iter().map(|a| a.needs.energy).collect();
+    assert_eq!(es, es2);
+    // 未配置 = 满精力开局（且不扰动既有属性序列）。
+    let w3 = World::new(
+        load_config(&test_config(false)).unwrap(),
+        42,
+        cat_roster(cat_names(3)),
+        true,
+    );
+    assert!(w3.agents.iter().all(|a| a.needs.energy == 100.0));
+}
+
 // ---------- M1 收尾：存档与验收 ----------
 
 #[test]
@@ -1746,6 +1787,11 @@ fn town_world(seed: u64, humans: usize) -> World {
         .map(|n| (n, "human".to_string()))
         .collect();
     let mut w = World::new(town_cfg(), seed, roster, true);
+    // 场景测试钉死开局精力（town.json 的 init_energy 40..90 是玩法调参，
+    // 会改变预热轨迹）；这里回满 = 旧版行为，断言不受调参牵动。
+    for a in w.agents.iter_mut() {
+        a.needs.energy = 100.0;
+    }
     w.set_player(0);
     w.log_meta(seed, 0);
     w
@@ -1869,6 +1915,10 @@ fn crime_caught_full_consequences() {
         .map(|n| (n, "human".to_string()))
         .collect();
     let mut w = World::new(cfg, 11, roster, true);
+    // 同 town_world：钉死开局精力，预热轨迹不受 town.json 调参牵动。
+    for a in w.agents.iter_mut() {
+        a.needs.energy = 100.0;
+    }
     w.set_player(0);
     while living_core::time::hour_of(w.tick) != 22 {
         w.tick();

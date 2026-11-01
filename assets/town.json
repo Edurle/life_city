@@ -74,7 +74,9 @@
     "habit_weight_cap": 4,
     "child_imitate_prob": 0.5,
     "depart_age_days": 300,
-    "depart_prob": 0.0025
+    "depart_prob": 0.0025,
+    "init_energy_min": 40,
+    "init_energy_max": 90
   },
   "areas": [
     {

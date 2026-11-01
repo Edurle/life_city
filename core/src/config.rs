@@ -225,6 +225,12 @@ pub struct Params {
     /// 同屋代理的初始熟悉度上限（U(0, 此值)）：同屋檐下有点眼熟，但算不上亲近。
     #[serde(default = "d_initial_bond_max")]
     pub initial_bond_max: f64,
+    /// 开局精力范围 U(min, max)（M8）：第一夜的作息天然错开——有人倒头就睡、
+    /// 有人熬夜。两者相等（缺省 100）= 全员满精力开局，行为与旧版一致。
+    #[serde(default = "d_full_need")]
+    pub init_energy_min: f64,
+    #[serde(default = "d_full_need")]
+    pub init_energy_max: f64,
     /// 地图尺寸（米）：事件位置采样与坐标边界。
     #[serde(default = "d_room", alias = "room_width")]
     pub map_width: f64,
@@ -427,6 +433,9 @@ fn d_bond_player_gain() -> f64 {
 }
 fn d_initial_bond_max() -> f64 {
     0.3
+}
+fn d_full_need() -> f64 {
+    100.0
 }
 fn d_area_exp_alpha() -> f64 {
     0.15
@@ -890,6 +899,17 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
         if b.cost < 0.0 {
             return Err(format!("行为 {} 的价格不应为负", b.id));
         }
+    }
+    // 开局精力范围（M8）。
+    let p = &cfg.params;
+    if !(0.0..=100.0).contains(&p.init_energy_min)
+        || !(0.0..=100.0).contains(&p.init_energy_max)
+        || p.init_energy_min > p.init_energy_max
+    {
+        return Err(format!(
+            "开局精力范围非法：{}..{}（应在 0..100 且 min ≤ max）",
+            p.init_energy_min, p.init_energy_max
+        ));
     }
     validate_tree(
         &cfg.tree,
