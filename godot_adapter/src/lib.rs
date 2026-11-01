@@ -394,6 +394,62 @@ impl SimNode {
         out
     }
 
+    /// 指定玩家角色（指令模式）：此后该代理可接受指令、消耗意志力。
+    #[func]
+    fn set_player(&mut self, idx: i32) {
+        if let Some(sim) = self.sim.as_mut() {
+            sim.set_player(idx.max(0) as u32);
+        }
+    }
+
+    /// 代理当前意志力（0–100；玩家指令的燃料）。
+    #[func]
+    fn agent_willpower(&self, idx: i64) -> f64 {
+        self.sim
+            .as_ref()
+            .and_then(|s| s.agents.get(idx.max(0) as usize))
+            .map(|a| a.willpower)
+            .unwrap_or(0.0)
+    }
+
+    /// 下达指令（指令模式）：核心校验、按习惯合拍度定价、扣意志力、排入下一拍。
+    /// 返回 [accepted(1/0), cost, 反应或拒绝原因]。
+    #[func]
+    fn issue_command(&mut self, idx: i64, behavior: GString) -> PackedStringArray {
+        let mut out = PackedStringArray::new();
+        let Some(sim) = self.sim.as_mut() else {
+            out.push("0");
+            return out;
+        };
+        let r = sim.issue_command(idx.max(0) as u32, &behavior.to_string());
+        out.push(if r.accepted { "1" } else { "0" });
+        out.push(format!("{:.0}", r.cost).as_str());
+        out.push(r.reason.as_str());
+        out
+    }
+
+    /// 可下指令的行为菜单（与 issue_command 同价，不含打断费）。
+    /// 扁平数组、每行为 8 字段：id, 显示名, 可用(1/0), 预计消耗, 门提示,
+    /// 自动化(1/0), 恐惧警示(1/0), 戒断目标(1/0)。
+    #[func]
+    fn behaviors_status(&mut self, idx: i64) -> PackedStringArray {
+        let mut out = PackedStringArray::new();
+        let Some(sim) = self.sim.as_mut() else {
+            return out;
+        };
+        for st in sim.behaviors_status(idx.max(0) as u32) {
+            out.push(st.id.as_str());
+            out.push(st.name.as_str());
+            out.push(if st.available { "1" } else { "0" });
+            out.push(format!("{:.0}", st.est_cost).as_str());
+            out.push(st.gate_note.as_str());
+            out.push(if st.automated { "1" } else { "0" });
+            out.push(if st.feared { "1" } else { "0" });
+            out.push(if st.goal_avoided { "1" } else { "0" });
+        }
+        out
+    }
+
     /// 累计决策数（性能自检）。
     #[func]
     fn decisions_done(&self) -> i64 {

@@ -3,6 +3,8 @@
 # 卡通外观由 shader 按材质名携带的参数重建（flat|/fx|/stripe|，见 shaders/）。
 # 旁观模式（移植自 M6 2D 客户端）：点居民看公开信息，密友门内才见内心（门在核心侧）；
 # 楼群材质按区域声誉染色（红低绿高，健康带不上色）。
+# 指令模式（设计稿 4.2–4.3 的最小竖切）：0 号居民是"你"（金色），选中自己
+# 可下指令——核心按习惯合拍度定价扣意志力，行为树从不否决指令只收代价。
 # 模拟全部住在 Rust 核心（SimNode），本脚本只读快照；代理用 MultiMesh 批量渲染。
 extends Node3D
 
@@ -58,9 +60,22 @@ var inspect_title: Label
 var inspect_body: RichTextLabel
 var follow_btn: Button
 var select_arg := -1           # --select=N：启动即选中（截图自检用）
+# 指令模式（最小竖切）：0 号代理是玩家（金色小人），意志力与定价全在核心侧。
+var player_idx := 0
+var player_name := ""
+var issue_debug := ""          # --issue=行为id：启动后自动给玩家下一条指令（自检用）
+var will_label: Label
+var cmd_feedback: Label
+var cmd_scroll: ScrollContainer
+var cmd_box: VBoxContainer
+var last_menu := ""           # 上次菜单内容（没变不重建按钮）
 # 视觉平滑：核心里"位置由行为决定"（开始行为即就位，路上时间不建模），
 # 表现层用指数趋近把跳变抹成连续滑动——核心语义与确定性不动。
 var visual_pos := PackedVector3Array()
+# 地表高度（GLB 实测：路面 0.16 / 草地 0.17 / 平台 0.15）——代理与光环
+# 要放在地表之上（此前 0.02 会把小腿和环埋进地面）。
+const GROUND_Y := 0.17
+const RING_Y := 0.26          # 光环管底(−0.09)刚好过草面，不埋不飘
 const GLIDE := 3.0        # 每秒收敛约 95%
 const SNAP_SQ := 2500.0   # 距离超过 50m 直接就位（离场哨兵位/初次出现）
 
@@ -83,15 +98,19 @@ func _ready() -> void:
 			detail_on = true
 		elif arg.begins_with("--select="):
 			select_arg = arg.substr(9).to_int()
+		elif arg.begins_with("--issue="):
+			issue_debug = arg.substr(8)
 	if screenshot_after > 0.0:
 		get_window().size = Vector2i(1920, 1080)
 	sim.start(42, cfg_path, 14, 3)
+	sim.set_player(player_idx)
+	player_name = sim.agent_names()[player_idx]
 	agent_count = sim.agent_positions().size()
 	species_bytes = sim.agent_species()
 	var p0: PackedVector2Array = sim.agent_positions()
 	visual_pos.resize(p0.size())
 	for i in p0.size():
-		visual_pos[i] = g2w(p0[i].x, p0[i].y, 0.02)
+		visual_pos[i] = g2w(p0[i].x, p0[i].y, GROUND_Y)
 	_build_environment()
 	_build_town()
 	_build_camera()
@@ -338,10 +357,13 @@ func _click_select(screen_px: Vector2) -> void:
 		return
 	selected = idx
 	_refresh_inspect()
+	if idx == player_idx:
+		_refresh_commands()
 
 func _deselect() -> void:
 	selected = -1
 	_stop_follow()
+	_set_command_ui_visible(false)
 	inspect_title.text = "点击一位居民看看"
 	inspect_body.clear()
 	inspect_body.append_text("（旁观模式：[b]表面[/b]人人可见——在做什么、在哪里；需求与内心只有 [b]自己或密友[/b] 能看到。）")
@@ -373,6 +395,63 @@ func _toggle_follow() -> void:
 		return
 	follow = not follow
 	follow_btn.text = "跟随镜头：开" if follow else "跟随镜头：关"
+
+# ---------- 指令模式（最小竖切） ----------
+
+func _set_command_ui_visible(on: bool) -> void:
+	will_label.visible = on
+	cmd_feedback.visible = on
+	cmd_scroll.visible = on
+
+func _refresh_commands() -> void:
+	# 指令菜单（仅玩家）：数据与定价全在核心侧（behaviors_status），
+	# 这里只渲染。按钮仅在菜单内容变化时重建（重建会吃掉正在进行的点击）。
+	if selected != player_idx:
+		_set_command_ui_visible(false)
+		return
+	_set_command_ui_visible(true)
+	var wp: float = sim.agent_willpower(player_idx)
+	will_label.text = "意志力 %.0f / 100" % wp
+	var flat: PackedStringArray = sim.behaviors_status(player_idx)
+	var joined := "|".join(flat)
+	if joined == last_menu:
+		return
+	last_menu = joined
+	for c in cmd_box.get_children():
+		c.queue_free()
+	for i in flat.size() / 8:
+		var id := flat[i * 8]
+		var disp := flat[i * 8 + 1]
+		var avail := flat[i * 8 + 2] == "1"
+		var cost := flat[i * 8 + 3].to_float()
+		var tags := ""
+		if flat[i * 8 + 5] == "1":
+			tags += " 自动"
+		if flat[i * 8 + 6] == "1":
+			tags += " 怕"
+		if flat[i * 8 + 7] == "1":
+			tags += " 违约"
+		var btn := Button.new()
+		btn.text = "%s ·%s −%.0f" % [disp, tags, cost]
+		btn.disabled = not avail or cost > wp
+		btn.tooltip_text = flat[i * 8 + 4]
+		btn.pressed.connect(_issue.bind(id))
+		cmd_box.add_child(btn)
+
+func _issue(behavior_id: String) -> void:
+	var r: PackedStringArray = sim.issue_command(player_idx, behavior_id)
+	if r.size() < 3:
+		return
+	var accepted := r[0] == "1"
+	var cost := r[1].to_float()
+	cmd_feedback.text = r[2]
+	if accepted:
+		cmd_feedback.text += "（意志力 −%.0f）" % cost
+		cmd_feedback.modulate = Color(0.7, 1.0, 0.75)
+	else:
+		cmd_feedback.modulate = Color(1.0, 0.72, 0.68)
+	_refresh_inspect()
+	_refresh_commands()
 
 func _rep_tint(rep: float) -> Array:
 	# 声誉 → [染色, 强度]；健康带内 [白, 0] 不上色（见常量注释）。
@@ -465,7 +544,7 @@ func _build_ui() -> void:
 	var hint := Label.new()
 	hint.add_theme_font_size_override("font_size", 14)
 	hint.modulate = Color(1.0, 1.0, 1.0, 0.62)
-	hint.text = "  点居民看详情 · 楼色随区域声誉"
+	hint.text = "  你是：%s（金色） · 点自己下指令 · 楼色随区域声誉" % player_name
 	hbox.add_child(hint)
 	# 旁观检查面板（M6 移植）：右侧常驻，点选后显示公开信息 + 密友内心。
 	inspect_panel = PanelContainer.new()
@@ -491,6 +570,23 @@ func _build_ui() -> void:
 	inspect_body.add_theme_font_size_override("normal_font_size", 15)
 	inspect_body.append_text("（旁观模式：[b]表面[/b]人人可见——在做什么、在哪里；需求与内心只有 [b]自己或密友[/b] 能看到。）")
 	vb.add_child(inspect_body)
+	# 指令区（选中自己时显示）：意志力 + 行为菜单（核心定价）+ 指令反馈。
+	will_label = Label.new()
+	will_label.add_theme_font_size_override("font_size", 15)
+	vb.add_child(will_label)
+	cmd_feedback = Label.new()
+	cmd_feedback.add_theme_font_size_override("font_size", 14)
+	cmd_feedback.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	cmd_feedback.custom_minimum_size = Vector2(0, 42)
+	vb.add_child(cmd_feedback)
+	cmd_scroll = ScrollContainer.new()
+	cmd_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	cmd_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	cmd_box = VBoxContainer.new()
+	cmd_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cmd_scroll.add_child(cmd_box)
+	vb.add_child(cmd_scroll)
+	_set_command_ui_visible(false)
 	inspect_panel.add_child(vb)
 	canvas.add_child(inspect_panel)
 	if detail_on:
@@ -527,7 +623,7 @@ func _process(delta: float) -> void:
 	for i in positions.size():
 		var sp := 1 if i < species_bytes.size() else 0
 		var sc := 1.0 if sp == 1 else 0.6
-		var target := g2w(positions[i].x, positions[i].y, 0.02)
+		var target := g2w(positions[i].x, positions[i].y, GROUND_Y)
 		var vp: Vector3 = visual_pos[i]
 		if vp.distance_squared_to(target) > SNAP_SQ:
 			vp = target
@@ -536,11 +632,14 @@ func _process(delta: float) -> void:
 		visual_pos[i] = vp
 		var basis := Basis().scaled(Vector3(sc, sc, sc))
 		mm.set_instance_transform(i, Transform3D(basis, vp))
-		mm.set_instance_color(i, Color(0.35, 0.45, 0.65) if sp == 1 else Color(1.0, 0.7, 0.3))
+		if i == player_idx:
+			mm.set_instance_color(i, Color(0.98, 0.80, 0.28))   # 你 = 金色
+		else:
+			mm.set_instance_color(i, Color(0.35, 0.45, 0.65) if sp == 1 else Color(1.0, 0.7, 0.3))
 	# 选中光环贴住选中者的视觉位置（相机不管怎么转都在脚下）
 	if selected >= 0 and selected < visual_pos.size():
 		sel_ring.visible = true
-		sel_ring.position = Vector3(visual_pos[selected].x, 0.06, visual_pos[selected].z)
+		sel_ring.position = Vector3(visual_pos[selected].x, RING_Y, visual_pos[selected].z)
 	elif sel_ring != null:
 		sel_ring.visible = false
 	# 跟随镜头：注视点贴向选中者的地面位置（平移/旋转手动操作会结束跟随）
@@ -555,6 +654,11 @@ func _process(delta: float) -> void:
 		clock_label.text = sim.clock_text()
 		_apply_area_reputation()
 		_refresh_inspect()
+		_refresh_commands()
+		if issue_debug != "":
+			# --issue=行为id（自检）：给玩家自动下一条指令，看反馈与意志力结算。
+			_issue(issue_debug)
+			issue_debug = ""
 
 func _resize_agents(n: int) -> void:
 	# 居民数变化（新生儿/离场后重进）：重建实例，新增者直接就位（不全场滑動）。
@@ -565,7 +669,7 @@ func _resize_agents(n: int) -> void:
 	visual_pos = PackedVector3Array()
 	visual_pos.resize(n)
 	for i in n:
-		var target := g2w(positions[i].x, positions[i].y, 0.02)
+		var target := g2w(positions[i].x, positions[i].y, GROUND_Y)
 		visual_pos[i] = old_visual[i] if i < old_visual.size() else target
 	mm.instance_count = n
 
