@@ -125,13 +125,20 @@ fn main() {
             .take(3)
             .map(|(k, v)| format!("{} {:.0}%", k, v * 100.0))
             .collect();
+        let departed = if let Some(d) = s.departed_tick {
+            format!("（第{}天离场）", d / 1440 + 1)
+        } else {
+            String::new()
+        };
         println!(
-            "{:<4} 温度{:.2} TV={:.3} | {} | 记忆{}条",
+            "{:<4}{} 温度{:.2} TV={:.3} | {} | 记忆{}条{}",
             s.name,
+            departed,
             s.temperature,
             s.tv_distance_to_first,
             top3.join("，"),
-            s.memory_count
+            s.memory_count,
+            if s.departed_tick.is_some() { "（这段人生停留在离开那天）" } else { "" }
         );
         for m in &s.top_memories {
             println!("        记忆: {m}");
@@ -147,10 +154,15 @@ fn main() {
         }
     }
     let st = &world.stats;
-    if st.thefts > 0 || st.job_changes > 0 || st.couples_formed > 0 || st.births > 0 {
+    if st.thefts > 0
+        || st.job_changes > 0
+        || st.couples_formed > 0
+        || st.births > 0
+        || st.departures > 0
+    {
         println!(
-            "\n=== 统计 === 盗窃 {} 起（被抓 {}）· 职业变动 {} 次 · 成对 {} 对 · 新生儿 {} 名",
-            st.thefts, st.thefts_caught, st.job_changes, st.couples_formed, st.births
+            "\n=== 统计 === 盗窃 {} 起（被抓 {}）· 职业变动 {} 次 · 成对 {} 对 · 新生儿 {} 名 · 离场 {} 位",
+            st.thefts, st.thefts_caught, st.job_changes, st.couples_formed, st.births, st.departures
         );
     }
 

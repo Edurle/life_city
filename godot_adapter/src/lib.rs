@@ -249,6 +249,13 @@ impl SimNode {
         let Some(a) = sim.agents.get(idx as usize) else {
             return out;
         };
+        // 离场者（M6 人口退出）：只报姓名与去向，其余字段无意义。
+        if let Some(d) = a.departed_tick {
+            out.push(a.name.as_str());
+            out.push("已离开小镇");
+            out.push(format!("（第 {} 天送行）", d / 1440 + 1).as_str());
+            return out;
+        }
         let species = if a.species == "human" {
             "人类"
         } else {

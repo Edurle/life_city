@@ -356,6 +356,13 @@ pub fn annual_summary(
     if babies > 0 {
         out.push(format!("家里添了 {babies} 个孩子。"));
     }
+    let departures = events
+        .iter()
+        .filter(|ev| matches!(ev, LogEvent::Depart { .. }))
+        .count();
+    if departures > 0 {
+        out.push(format!("镇上送走了 {departures} 位居民。"));
+    }
     if out.is_empty() {
         out.push("这一年平平淡淡，也是好日子。".to_string());
     }
@@ -404,7 +411,23 @@ fn ev_tick(ev: &LogEvent) -> Option<u64> {
         | Born { tick, .. }
         | Imitate { tick, .. }
         | ScenarioStart { tick, .. }
-        | ScenarioResult { tick, .. } => *tick,
+        | ScenarioResult { tick, .. }
+        | Depart { tick, .. } => *tick,
+    })
+}
+
+/// 某代理是否为 player 的孩子（按出生事件回溯——日记与故事的亲情线索）。
+fn is_own_child(events: &[LogEvent], who: u32, player: u32) -> bool {
+    events.iter().any(|ev| {
+        matches!(
+            ev,
+            LogEvent::Born {
+                agent: a,
+                mother,
+                father,
+                ..
+            } if *a == who && (*mother == player || *father == player)
+        )
     })
 }
 
@@ -578,6 +601,14 @@ pub fn player_story(
                         scenario,
                         if *won { "达成" } else { "未成" }
                     ),
+                ));
+            }
+            LogEvent::Depart { tick, agent, .. }
+                if is_own_child(events, *agent, player) =>
+            {
+                lines.push((
+                    *tick,
+                    format!("孩子{}长大搬去了别的城市", name_of(*agent)),
                 ));
             }
             _ => {}

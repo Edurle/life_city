@@ -1823,8 +1823,14 @@ fn crime_success_transfers_and_memorializes() {
             w.agents[i].current = None;
         }
         w.agents[1].next_heartbeat = w.tick + 500; // 钉在案发现场
-        w.teleport(0, (25.0, 4.0));
-        w.teleport(1, (25.2, 4.0));
+        // 其他居民钉去家里：案发 8 米内只剩这位钱包最鼓的受害者。
+        for i in 2..w.agents.len() {
+            w.teleport(i as u32, (50.0, 30.0));
+            w.agents[i].current = None;
+            w.agents[i].next_heartbeat = w.tick + 500;
+        }
+        w.teleport(0, (18.5, 4.0));
+        w.teleport(1, (18.7, 4.0));
         w.agents[0].pending_command = Some("steal".into());
         w.agents[0].next_heartbeat = w.tick + 1;
         w.run(90);
@@ -1876,8 +1882,8 @@ fn crime_caught_full_consequences() {
             w.agents[i].current = None;
         }
         w.agents[1].next_heartbeat = w.tick + 500;
-        w.teleport(0, (25.0, 4.0));
-        w.teleport(1, (25.2, 4.0));
+        w.teleport(0, (18.5, 4.0));
+        w.teleport(1, (18.7, 4.0));
         w.agents[0].pending_command = Some("steal".into());
         w.agents[0].next_heartbeat = w.tick + 1;
         w.run(90);
@@ -1927,8 +1933,8 @@ fn hearsay_spreads_crime_memory() {
         w.agents[i].current = None;
     }
     w.agents[1].wallet = 300.0;
-    w.teleport(0, (25.0, 4.0));
-    w.teleport(1, (25.2, 4.0));
+    w.teleport(0, (18.5, 4.0));
+    w.teleport(1, (18.7, 4.0));
     w.agents[1].next_heartbeat = w.tick + 500; // 钉在案发现场
     w.agents[0].pending_command = Some("steal".into());
     w.agents[0].next_heartbeat = w.tick + 1;
@@ -2844,4 +2850,273 @@ fn theft_rate_tuned_down() {
         "调参后年盗窃应低于 400（目标继续逼近 <200，靠后续内容量）：{}",
         st.thefts
     );
+}
+
+// ---------- M6 二阶段：童年实时模仿、人口退出 ----------
+
+/// 改参数后的 town 配置（参数是数据——测试改数据不改引擎）。
+fn town_cfg_patched(repls: &[(&str, &str)]) -> living_core::SimConfig {
+    let json = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/town.json"))
+        .expect("需要 assets/town.json");
+    let mut json = json;
+    for (from, to) in repls {
+        json = json.replace(from, to);
+    }
+    load_config(&json).unwrap()
+}
+
+/// 生一个孩子并等待其落地（生育概率拉满 + 直接撮合一对），随后推进到
+/// 上午 9 点（公园等白天行为的时间门打开）。返回孩子编号。
+fn bear_a_child(w: &mut World) -> u32 {
+    w.set_bond(1, 2, 0.95);
+    w.relations.set_couple(1, 2, w.tick);
+    let before = w.agents.len();
+    w.run(1440 + 60);
+    assert_eq!(w.agents.len(), before + 1, "第二天应添一名新生儿");
+    while living_core::time::hour_of(w.tick) < 9 {
+        w.tick();
+    }
+    w.agents.last().unwrap().id
+}
+
+/// 童年实时模仿（M6 二阶段）：父母做什么，孩子跟在身边做同样的事。
+/// 跟随选择来自父母而非 softmax（Decision.imitated），门把照常把关。
+#[test]
+fn childhood_realtime_imitation_follows_parent() {
+    let cfg = town_cfg_patched(&[
+        (r#""birth_prob": 0.02"#, r#""birth_prob": 1.0"#),
+        (r#""birth_min_couple_days": 20"#, r#""birth_min_couple_days": 0"#),
+        (r#""child_imitate_prob": 0.5"#, r#""child_imitate_prob": 1.0"#),
+    ]);
+    let roster: Vec<(String, String)> = living_core::human_names(6)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    let mut w = World::new(cfg, 23, roster, true);
+    w.set_player(0);
+    let baby = bear_a_child(&mut w);
+    // 需求调舒适：生理反射不抢先（饿着的孩子先吃饭，不跟着散步——
+    // 这是设计；这里验证的是"无饥无忧时的跟随"）。
+    {
+        let b = &mut w.agents[baby as usize];
+        b.needs.hunger = 80.0;
+        b.needs.energy = 80.0;
+        b.needs.fun = 80.0;
+        b.needs.social = 80.0;
+        b.needs.hygiene = 80.0;
+        b.needs.bladder = 80.0;
+    }
+    // 父母去公园散步（免费、无需求门——孩子做得了）。
+    force_action(&mut w, 1, "walk_park");
+    w.agents[baby as usize].lod = 0; // 跟随发生在逐拍模拟层（LOD）
+    w.agents[baby as usize].current = None;
+    w.agents[baby as usize].next_heartbeat = w.tick + 1;
+    w.run(2);
+    assert_eq!(
+        w.agents[1].current.as_ref().map(|(b, _, _)| b.as_str()),
+        Some("walk_park")
+    );
+    let baby_doing = w.agents[baby as usize]
+        .current
+        .as_ref()
+        .map(|(b, _, _)| b.clone());
+    assert_eq!(
+        baby_doing.as_deref(),
+        Some("walk_park"),
+        "孩子应跟着父母做同样的事"
+    );
+    assert_eq!(w.agents[baby as usize].imitate_from, Some(1));
+    assert!(
+        w.logger.buf.contains(r#""imitated":true"#),
+        "跟随选择应有日志标记"
+    );
+    // 同地点（跟在父母身边）：两人都在公园草坪。
+    let pp = w.agents[1].pos;
+    let bp = w.agents[baby as usize].pos;
+    let d = ((pp.0 - bp.0).powi(2) + (pp.1 - bp.1).powi(2)).sqrt();
+    assert!(d < 0.5, "应在同一地点：{pp:?} vs {bp:?}");
+}
+
+/// 门把把关：父母做的事孩子做不了（需求门未开），不跟随。
+#[test]
+fn childhood_imitation_respects_gates() {
+    let cfg = town_cfg_patched(&[
+        (r#""birth_prob": 0.02"#, r#""birth_prob": 1.0"#),
+        (r#""birth_min_couple_days": 20"#, r#""birth_min_couple_days": 0"#),
+        (r#""child_imitate_prob": 0.5"#, r#""child_imitate_prob": 1.0"#),
+    ]);
+    let roster: Vec<(String, String)> = living_core::human_names(6)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    let mut w = World::new(cfg, 29, roster, true);
+    w.set_player(0);
+    let baby = bear_a_child(&mut w);
+    // 孩子不饿（hunger 100）：吃饭的门不开。
+    w.agents[baby as usize].needs.hunger = 100.0;
+    w.agents[baby as usize].lod = 0;
+    w.agents[baby as usize].current = None;
+    w.agents[baby as usize].next_heartbeat = w.tick + 1;
+    // 父方要真饿（否则 eat_home 起不来，线索会落到另一位家长身上）；
+    // 另一位家长钉住不做事，保证孩子的模仿线索只有 eat_home。
+    w.agents[1].needs.hunger = 40.0;
+    w.agents[2].current = None;
+    w.agents[2].next_heartbeat = w.tick + 500;
+    let log_mark = w.logger.buf.len(); // 只看本阶段日志（出生当天可能已有合法跟随）
+    force_action(&mut w, 1, "eat_home");
+    w.run(2);
+    assert!(
+        !w.logger.buf[log_mark..].contains(r#""imitated":true"#),
+        "门未开的行为不该被跟随"
+    );
+    assert_ne!(
+        w.agents[baby as usize]
+            .current
+            .as_ref()
+            .map(|(b, _, _)| b.as_str()),
+        Some("eat_home")
+    );
+}
+
+/// 概率关到 0：跟随机制整体关闭（不产生跟随决策）。
+#[test]
+fn childhood_imitation_disabled_by_prob() {
+    let cfg = town_cfg_patched(&[
+        (r#""birth_prob": 0.02"#, r#""birth_prob": 1.0"#),
+        (r#""birth_min_couple_days": 20"#, r#""birth_min_couple_days": 0"#),
+        (r#""child_imitate_prob": 0.5"#, r#""child_imitate_prob": 0.0"#),
+    ]);
+    let roster: Vec<(String, String)> = living_core::human_names(6)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    let mut w = World::new(cfg, 31, roster, true);
+    w.set_player(0);
+    let baby = bear_a_child(&mut w);
+    force_action(&mut w, 1, "walk_park");
+    w.agents[baby as usize].lod = 0;
+    w.agents[baby as usize].current = None;
+    w.agents[baby as usize].next_heartbeat = w.tick + 1;
+    w.run(2);
+    assert!(
+        !w.logger.buf.contains(r#""imitated":true"#),
+        "概率为 0 时不该有跟随决策"
+    );
+}
+
+/// 人口退出（M6 二阶段）：年迈离场——概率拉满后除玩家外全体离开，
+/// 恋人自动分手、岗位腾空、日志有 Depart；名册保留（id 与记忆都在）。
+#[test]
+fn elders_depart_and_leave_cleanly() {
+    let cfg = town_cfg_patched(&[
+        (r#""depart_age_days": 300"#, r#""depart_age_days": 61"#),
+        (r#""depart_prob": 0.0025"#, r#""depart_prob": 1.0"#),
+    ]);
+    let roster: Vec<(String, String)> = living_core::human_names(6)
+        .into_iter()
+        .map(|n| (n, "human".to_string()))
+        .collect();
+    let mut w = World::new(cfg, 27, roster, true);
+    w.set_player(0);
+    // 撮合一对：离场时应自动分手（另一半回到单身）。
+    w.set_bond(1, 2, 0.95);
+    w.relations.set_couple(1, 2, w.tick);
+    w.run(2 * 1440);
+    assert_eq!(w.stats.departures, 5, "除玩家外 5 位元老应全部离场");
+    assert_eq!(w.agents.len(), 6, "名册保留（id=下标不变量）");
+    for a in &w.agents {
+        if a.is_player {
+            assert!(a.present(), "玩家永不离场");
+        } else {
+            assert!(!a.present(), "{} 应已离场", a.name);
+            assert!(a.job.is_none(), "离场应腾出岗位");
+        }
+    }
+    assert!(w.relations.couple_pairs().is_empty(), "离场应自动分手");
+    assert!(w.logger.buf.contains(r#""t":"depart"#));
+    assert!(w.logger.buf.contains(r#""reason":"年迈""#));
+    // 离场者的社交不应再被找到（给离场者打电话就过了）。
+    let news = w.news_digest(10);
+    assert!(
+        news.iter().any(|n| n.contains("离开小镇")),
+        "离场应上新闻：{news:?}"
+    );
+}
+
+/// 一年统计（M6 调参）：离场温和发生——老镇有出有进，不会被掏空。
+#[test]
+fn town_year_departure_statistics() {
+    let mut w = town_world(5, 26);
+    w.logger.enabled = false;
+    w.run(365 * 1440);
+    let present = w.agents.iter().filter(|a| a.present()).count();
+    println!(
+        "[M6 二阶段] 一年：离场 {} 位 · 新生儿 {} 名 · 年末在场 {}/{}",
+        w.stats.departures,
+        w.stats.births,
+        present,
+        w.agents.len()
+    );
+    assert!(
+        (1..=12).contains(&w.stats.departures),
+        "离场应温和发生（首年约四分之一元老）：{}",
+        w.stats.departures
+    );
+    assert!(present >= 18, "镇子不该被掏空：{present}/26");
+    assert!(w.stats.births >= 1, "出生照常（离场腾出人口额度）");
+}
+
+/// 离场后的存档往返：读档续跑与连续运行完全一致。
+#[test]
+fn save_load_m6_departure_roundtrip() {
+    let json = {
+        let base = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../assets/town.json"
+        ))
+        .unwrap();
+        base.replace(r#""depart_age_days": 300"#, r#""depart_age_days": 61"#)
+            .replace(r#""depart_prob": 0.0025"#, r#""depart_prob": 1.0"#)
+    };
+    let mk = || {
+        let cfg = load_config(&json).unwrap();
+        let roster: Vec<(String, String)> = living_core::human_names(6)
+            .into_iter()
+            .map(|n| (n, "human".to_string()))
+            .collect();
+        let mut w = World::new(cfg, 33, roster, true);
+        w.set_player(0);
+        w
+    };
+    let mut a = mk();
+    a.run(2 * 1440); // 全员离场后的世界
+    let bytes = a.to_save();
+    let offset = a.logger.buf.len();
+    a.run(2 * 1440);
+    let mut b = World::from_save(load_config(&json).unwrap(), &bytes).unwrap();
+    b.run(2 * 1440);
+    assert_eq!(b.stats.departures, a.stats.departures);
+    assert_eq!(
+        b.logger.buf,
+        a.logger.buf[offset..],
+        "离场世界的读档续跑应与连续运行一致"
+    );
+}
+
+/// 职业门回归（M6 二阶段内容回填）：无业者不执行工作行为——
+/// 街道岗位 6 个，9 人里挤不进岗位的 3 人不该出现在写字间。
+#[test]
+fn jobless_never_perform_work_behavior() {
+    let mut w = street_world(43, 9, 0);
+    let employed = w.agents.iter().filter(|a| a.job.is_some()).count();
+    assert_eq!(employed, 6, "6 个岗位给 9 人中的前 6 位");
+    w.run(5 * 1440);
+    for a in &w.agents {
+        let worked = a.exec_counts.get("go_to_work").copied().unwrap_or(0);
+        if a.job.is_none() {
+            assert_eq!(worked, 0, "无业的 {} 不应上班", a.name);
+        }
+    }
+    let total: u64 = w.agents.iter().map(|a| a.exec_counts.get("go_to_work").copied().unwrap_or(0)).sum();
+    assert!(total > 0, "在岗者照常上班：{total}");
 }

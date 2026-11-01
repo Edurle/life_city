@@ -81,6 +81,8 @@ pub struct TownStats {
     /// M5 二阶段：成对次数与新生儿数。
     pub couples_formed: u64,
     pub births: u64,
+    /// M6 二阶段：离场人数（年迈/迁出）。
+    pub departures: u64,
 }
 
 /// 玩家指令的结算结果。
@@ -168,6 +170,9 @@ pub struct World {
     /// 物种索引（按代理编号）：出生不改变物种，决策循环里查目标物种用
     ///（不必借用 agents 本身——那里正被逐个可变借用）。
     pub(crate) species_index: Vec<String>,
+    /// 离场索引（按代理编号，M6 二阶段）：与 species_index 同步维护——
+    /// 决策循环里过滤"给离场者打电话"这类网格查不到的残留引用。
+    pub(crate) departed_index: Vec<bool>,
     pub logger: Logger,
     /// 性能统计（基准模式用）。
     pub decisions_done: u64,
@@ -266,6 +271,7 @@ impl World {
             .map(|e| world_rng.uniform_int(e.interval_min, e.interval_max))
             .collect();
         let species_index: Vec<String> = agents.iter().map(|a| a.species.clone()).collect();
+        let departed_index: Vec<bool> = vec![false; agents.len()];
         World {
             tick: 0,
             cfg,
@@ -280,6 +286,7 @@ impl World {
             life_rng: Rng::seeded(derive_seed(seed, 0, STREAM_LIFE)),
             world_seed: seed,
             species_index,
+            departed_index,
             logger: Logger::new(logging),
             decisions_done: 0,
             collect_recent: false,
@@ -323,6 +330,11 @@ impl World {
         let mut t0: Vec<(f64, u32)> = Vec::new();
         let mut t1: Vec<(f64, u32)> = Vec::new();
         for a in &mut self.agents {
+            // 离场者恒为背景层（不模拟、不占层级名额）。
+            if !a.present() {
+                a.lod = 2;
+                continue;
+            }
             if a.is_player {
                 a.lod = 0;
                 t0.push((0.0, a.id));
@@ -434,6 +446,7 @@ impl World {
     }
 
     /// 密友名单（亲密值 ≥ close_friend_bond，降序）——查看入口用。
+    /// 只列仍在镇上的（离场的朋友只能怀念，不能探望）。
     pub fn close_friends(&self, id: u32) -> Vec<(u32, String, f64)> {
         let threshold = self.cfg.params.close_friend_bond;
         let mut v: Vec<(u32, String, f64)> = self
@@ -444,7 +457,7 @@ impl World {
             .filter_map(|(oid, b)| {
                 self.agents
                     .iter()
-                    .find(|a| a.id == oid)
+                    .find(|a| a.id == oid && a.present())
                     .map(|a| (oid, a.name.clone(), b))
             })
             .collect();
@@ -631,7 +644,22 @@ impl World {
     /// 关卡求值视图（with 风格：闭包借用 self，不能跨越生命周期返回）。
     fn with_scenario_view<R>(&self, f: impl FnOnce(&crate::scenario::ScenarioView) -> R) -> R {
         let player = self.agents.iter().find(|a| a.is_player);
-        let player_bond_max = player.map(|a| self.relations.max_bond(a.id)).unwrap_or(0.0);
+        // 最亲密的朋友须仍在镇上（他离开了，"有挚友"就不再成立）。
+        let player_bond_max = player
+            .map(|a| {
+                self.relations
+                    .top_for(a.id, usize::MAX)
+                    .into_iter()
+                    .find(|(oid, _)| {
+                        self.agents
+                            .get(*oid as usize)
+                            .map(|t| t.id == *oid && t.present())
+                            .unwrap_or(false)
+                    })
+                    .map(|(_, b)| b)
+                    .unwrap_or(0.0)
+            })
+            .unwrap_or(0.0);
         let job_changes = self
             .scenario
             .as_ref()
@@ -758,6 +786,9 @@ impl World {
         // 地点整洁度恢复（清洁服务）、T2 背景代理的按天批量结算（LOD，M4）。
         if is_day_boundary(tick) {
             for a in &mut self.agents {
+                if !a.present() {
+                    continue; // 离场者的记忆停在离开那天
+                }
                 let nostalgia = a.nostalgia(&self.cfg.params, tick);
                 a.memory.daily_decay(nostalgia);
             }
@@ -770,7 +801,7 @@ impl World {
             let upkeep = self.cfg.params.daily_upkeep;
             if upkeep > 0.0 {
                 for a in &mut self.agents {
-                    if !a.is_child(&self.cfg.params, tick) {
+                    if a.present() && !a.is_child(&self.cfg.params, tick) {
                         a.wallet = (a.wallet - upkeep).max(0.0);
                     }
                 }
@@ -780,6 +811,8 @@ impl World {
             self.settle_background_day(&mut events);
             // M5 职业流动：无业或经济压力大者每天评估一次（概率驱动，无剧本）。
             self.job_market_daily(tick, &mut events);
+            // M6 二阶段：人口退出（老龄离场/迁出）——老镇有出有进。
+            self.depart_daily(tick, &mut events);
             // M6 目标关卡：开局事件注入 + 到期结算。
             self.scenario_daily(tick, &mut events);
         }
@@ -788,7 +821,7 @@ impl World {
         // 改在日界批量结算时一次扣一整天（LOD：统计近似，需求在时段间静止）。
         let decay = self.cfg.needs.clone();
         for a in &mut self.agents {
-            if a.lod != 2 {
+            if a.lod != 2 && a.present() {
                 a.needs.decay(&decay, 1);
             }
         }
@@ -860,6 +893,9 @@ impl World {
             let rate = self.cfg.params.habit_decay_hourly;
             let gmult = self.cfg.params.goal_decay_mult;
             for a in &mut self.agents {
+                if !a.present() {
+                    continue;
+                }
                 a.habit_decay(rate);
                 a.goal_hourly_suppress(rate, gmult);
                 a.willpower = (a.willpower + 0.2).min(100.0);
@@ -878,6 +914,9 @@ impl World {
             }
             // 限期目标到期：零违约 = 成功（压制已转化为自然衰减，习惯真的改掉了）。
             for ai in 0..self.agents.len() {
+                if !self.agents[ai].present() {
+                    continue;
+                }
                 let ended: Vec<usize> = self.agents[ai]
                     .goals
                     .iter()
@@ -952,7 +991,7 @@ impl World {
                     let remote = d.tags.iter().any(|t| t == "remote_social");
                     if let Some(tid) = chosen_target {
                         if let Some(o) = self.agents.get(tid as usize) {
-                            if o.id == tid {
+                            if o.id == tid && o.present() {
                                 companions.push((
                                     o.id,
                                     o.is_player,
@@ -1490,6 +1529,7 @@ impl World {
         // 心跳决策（空闲且到期的代理；字段级借用避免冲突）。
         // T2 背景代理不逐拍决策（LOD）：它们的每一天在日界批量结算。
         let species_index = &self.species_index;
+        let departed_index = &self.departed_index;
         let agents = &mut self.agents;
         let cfg = &self.cfg;
         let behaviors = &self.behaviors;
@@ -1497,16 +1537,42 @@ impl World {
         let area_states = &self.area_states;
         let relations = &self.relations;
         let grid = &mut self.grid;
-        for a in agents.iter_mut() {
+        for ai in 0..agents.len() {
             // T2 背景代理不逐拍决策（LOD）——但有待执行指令的除外
             //（指令不该被背景层吞掉；正常只有玩家角色有指令、恒为 T0，
             // 这里防御测试/工具直接给 NPC 塞指令的情况）。
-            if (a.lod == 2 && a.pending_command.is_none())
-                || a.current.is_some()
-                || tick < a.next_heartbeat
             {
-                continue;
+                let a = &agents[ai];
+                if (a.lod == 2 && a.pending_command.is_none())
+                    || a.current.is_some()
+                    || tick < a.next_heartbeat
+                    || !a.present()
+                {
+                    continue;
+                }
             }
+            // M6 童年实时模仿线索：父母中（编号序）第一位正在做事的，
+            // 他做的事就是孩子想跟着做的事（是否跟得上由 decide 里的门把把关）。
+            let imitate: Option<(u32, String)> = {
+                let a = &agents[ai];
+                if a.is_child(&cfg.params, tick) && cfg.params.child_imitate_prob > 0.0 {
+                    a.parents.and_then(|(pa, pb)| {
+                        [pa, pb].into_iter().find_map(|pid| {
+                            agents
+                                .get(pid as usize)
+                                .filter(|p| p.id == pid && p.present())
+                                .and_then(|p| {
+                                    p.current
+                                        .as_ref()
+                                        .map(|(bid, _, _)| (pid, bid.clone()))
+                                })
+                        })
+                    })
+                } else {
+                    None
+                }
+            };
+            let a = &mut agents[ai];
             let comfort = comfort_of(grid, relations, &cfg.params, a);
             let mate = relations.couple_of(a.id).is_some();
             events.extend(decide(
@@ -1518,6 +1584,7 @@ impl World {
                 tick,
                 comfort,
                 mate,
+                imitate,
             ));
             self.decisions_done += 1;
             // 行为开始 → 移动到行为地点（无地点行为原地不动）。
@@ -1542,6 +1609,9 @@ impl World {
                         };
                         if *species != a.species {
                             continue; // 找同类的社交（猫找人聊天就过了）
+                        }
+                        if departed_index.get(oid as usize).copied().unwrap_or(false) {
+                            continue; // 离场者收不到电话（网格里没有他，远程社交显式过滤）
                         }
                         let bond = relations.bond(a.id, oid);
                         let fresh = a.freshness(oid, tick, cfg.params.freshness_halflife_days);
@@ -1596,6 +1666,13 @@ impl World {
                         a.pos = (sd.x, sd.y);
                         grid.move_to(a.id, a.pos);
                     }
+                } else if let Some(pid) = a.imitate_from {
+                    // M6 童年实时模仿：无地点行为平时原地不动——
+                    // 但跟着父母做的孩子挪到父母身边（"跟在妈妈脚边"）。
+                    if let Some(pp) = grid.pos(pid) {
+                        a.pos = (pp.0 + 0.3, pp.1 + 0.1);
+                        grid.move_to(a.id, a.pos);
+                    }
                 }
             }
         }
@@ -1635,7 +1712,9 @@ impl World {
             if !both_adult {
                 continue;
             }
-            if p.max_population > 0 && self.agents.len() >= p.max_population {
+            if p.max_population > 0
+                && self.agents.iter().filter(|a| a.present()).count() >= p.max_population
+            {
                 continue;
             }
             if self.life_rng.next_f64() < p.birth_prob {
@@ -1669,6 +1748,7 @@ impl World {
                 baby.next_heartbeat = tick + 30;
                 self.agents.push(baby);
                 self.species_index.push("human".to_string());
+                self.departed_index.push(false);
                 self.grid.move_to(id, mpos);
                 self.relations.set_bond(id, a, p.parent_bond);
                 self.relations.set_bond(id, b, p.parent_bond);
@@ -1683,6 +1763,84 @@ impl World {
         }
     }
 
+    /// M6 二阶段：人口退出（老龄离场 / 迁出），日界评估——概率驱动，无剧本。
+    /// 离场者保留在数组里（id=下标不变量、名字可查、活人的记忆与关系都在），
+    /// 但不再参与任何模拟：移出网格、清空职业与动作、恋人自动分手。
+    /// 老镇由此有出有进：老人离开腾出的岗位与人口额度，让年轻一代接上。
+    fn depart_daily(&mut self, tick: Tick, events: &mut Vec<LogEvent>) {
+        let p = &self.cfg.params;
+        let age_on = p.depart_age_days > 0;
+        let emigrate_on = p.emigrate_pressure_above < 1.0;
+        if !age_on && !emigrate_on {
+            return; // 机制整体关闭（不消耗随机数）
+        }
+        for idx in 0..self.agents.len() {
+            let (aid, age, child, jobless, wallet, present, player) = {
+                let a = &self.agents[idx];
+                (
+                    a.id,
+                    a.age_days(tick),
+                    a.is_child(p, tick),
+                    a.job.is_none(),
+                    a.wallet,
+                    a.present(),
+                    a.is_player,
+                )
+            };
+            if !present || player {
+                continue; // 离场者不再评估；玩家角色永不离场（游戏没有"你走了"的结局）
+            }
+            // 触发类别决定用哪个概率（年迈/迁出各有一档）。
+            let (reason, prob): (&str, f64) = if age_on && age >= p.depart_age_days as f64 {
+                ("年迈", p.depart_prob)
+            } else if emigrate_on
+                && !child
+                && jobless
+                && economic_pressure(wallet, p.poverty_line) > p.emigrate_pressure_above
+            {
+                ("外出谋生", p.emigrate_prob)
+            } else {
+                continue;
+            };
+            if self.life_rng.next_f64() >= prob {
+                continue;
+            }
+            // 离场结算：恋人分手（另一半次日回到单身，生活继续）。
+            let mate = self.relations.couple_of(aid);
+            self.stats.departures += 1;
+            events.push(LogEvent::Depart {
+                tick,
+                agent: aid,
+                reason: reason.to_string(),
+                age_days: age,
+            });
+            if let Some(m) = mate {
+                self.relations.break_couple(aid, m);
+                events.push(LogEvent::Couple {
+                    tick,
+                    a: aid,
+                    b: m,
+                    started: false,
+                });
+            }
+            let a = &mut self.agents[idx];
+            a.job = None; // 腾出岗位
+            a.current = None;
+            a.current_variant = None;
+            a.pending_command = None;
+            a.goals.clear();
+            a.social_target = None;
+            a.imitate_from = None;
+            a.lod = 2;
+            a.departed_tick = Some(tick);
+            a.pos = (-1000.0, -1000.0); // 地图外的哨兵位：表现层自然不画
+            if let Some(d) = self.departed_index.get_mut(idx) {
+                *d = true;
+            }
+            self.grid.remove(aid);
+        }
+    }
+
     /// M5 职业市场（设计稿 5.3 职业选择公式）：日界评估。
     /// 候选 = 有空缺的岗位 + 无门槛的非法行当 + 无业；
     /// 权重 = 职业基准 × 人格契合（诚实度斜率） × 经济压力。
@@ -1694,11 +1852,14 @@ impl World {
         }
         let poverty = self.cfg.params.poverty_line;
         for idx in 0..self.agents.len() {
-            // 只有树里用职业门的物种参加（猫不找工作）；童年也不找（先长大）。
-            if !tree_uses_jobs(
-                self.cfg.tree_for(&self.agents[idx].species),
-                &self.cfg.subtrees,
-            ) || self.agents[idx].is_child(&self.cfg.params, tick)
+            // 只有树里用职业门的物种参加（猫不找工作）；童年也不找（先长大）；
+            // 离场者不再找工作（岗位在离场结算时已腾出）。
+            if !self.agents[idx].present()
+                || !tree_uses_jobs(
+                    self.cfg.tree_for(&self.agents[idx].species),
+                    &self.cfg.subtrees,
+                )
+                || self.agents[idx].is_child(&self.cfg.params, tick)
             {
                 continue;
             }
@@ -1818,7 +1979,12 @@ impl World {
         let affected: Vec<u32> = if def.radius > 0.0 {
             self.grid.query_radius(pos, def.radius)
         } else {
-            self.agents.iter().map(|a| a.id).collect()
+            // 全图事件也只落在仍在镇上的人身上（离场者不在网格里，这里同规过滤）。
+            self.agents
+                .iter()
+                .filter(|a| a.present())
+                .map(|a| a.id)
+                .collect()
         };
         // 事件情境标签 = 事件自身标签 + 影响半径内地点的特征标签。
         // "在纸箱附近被吸尘器吓到"记住的是那个角落的特征——
@@ -1966,7 +2132,7 @@ impl World {
         let critical = self.cfg.critical_need;
         let alpha = self.cfg.params.alpha;
         for idx in 0..self.agents.len() {
-            if self.agents[idx].lod != 2 {
+            if self.agents[idx].lod != 2 || !self.agents[idx].present() {
                 continue;
             }
             let mate = self.relations.couple_of(self.agents[idx].id).is_some();
@@ -2566,6 +2732,9 @@ impl World {
         if viewer_id == target_id {
             return Err("这是它自己（用状态面板看）".into());
         }
+        if !t.present() {
+            return Err("他已经离开了小镇".into());
+        }
         let bond = self.relations.bond(viewer_id, target_id);
         let threshold = self.cfg.params.close_friend_bond;
         if bond < threshold {
@@ -2647,6 +2816,7 @@ impl World {
                 top_bonds,
                 age_days: a.age_days(self.tick),
                 lover,
+                departed_tick: a.departed_tick,
             });
         }
         let areas: Vec<AreaSummary> = self
@@ -2670,6 +2840,8 @@ impl World {
 /// 决策核心（自由函数：cfg/behaviors/spots 只读，代理可变）。
 /// 返回 [GoalResist/GoalViolation…]、[Decision, ActionStart] 日志事件。
 /// mate（M5 二阶段）：有恋人 → 伴侣门放行约会分支。
+/// imitate（M6 二阶段）：童年实时模仿线索（父母编号, 正在做的事）——
+/// 孩子跟着父母做同样的事（跟在父母身边），门把照常把关。
 #[allow(clippy::too_many_arguments)]
 fn decide(
     cfg: &SimConfig,
@@ -2680,11 +2852,14 @@ fn decide(
     tick: Tick,
     comfort: f64,
     mate: bool,
+    imitate: Option<(u32, String)>,
 ) -> Vec<LogEvent> {
     let options = compute_options(cfg, behaviors, spots, area_states, a, tick, comfort, mate);
     let auto_ratio = cfg.params.habit_auto_ratio;
     // 限期目标对抗过程中产生的事件（忍住/失守），排在 Decision 之前。
     let mut extra: Vec<LogEvent> = Vec::new();
+    let mut imitated = false;
+    a.imitate_from = None;
 
     let (choice, factors) = if let Some(cmd) = a.pending_command.take() {
         // 第四层：玩家指令覆盖（成本已在 issue_command 结算）。
@@ -2752,6 +2927,34 @@ fn decide(
                 forced: true,
                 will_command: false,
                 habit_auto: a.is_automated(&o, auto_ratio),
+            },
+        )
+    } else if let Some((pid, bid)) = imitate.filter(|(_, cue)| {
+        // M6 童年实时模仿：不是玩家（指令与意志系统优先）、还在童年、
+        // 父母做的事自己也做得了（需求门/时间门/资源门槛/职业门全把关——
+        // 不饿的孩子不跟着吃饭，没上岗的孩子不跟着上班）。
+        !a.is_player
+            && a.is_child(&cfg.params, tick)
+            && cfg.params.child_imitate_prob > 0.0
+            && options.iter().any(|o| o.behavior == *cue)
+            && a.rng_decision.next_f64() < cfg.params.child_imitate_prob
+    }) {
+        // 跟着父母做：选择来自父母而非 softmax，因素分解照常可解释。
+        let info = options.iter().find(|o| o.behavior == bid).unwrap();
+        imitated = true;
+        a.imitate_from = Some(pid);
+        (
+            bid.clone(),
+            FactorBreakdown {
+                base: info.base,
+                weight: info.weight,
+                need_mult: info.need_mult,
+                mem_mult: info.mem_mult,
+                area_mult: info.area_mult,
+                comfort,
+                forced: false,
+                will_command: false,
+                habit_auto: a.is_automated(&bid, auto_ratio),
             },
         )
     } else {
@@ -2929,6 +3132,7 @@ fn decide(
         temperature: a.temperature,
         factors,
         choice: choice.clone(),
+        imitated,
     });
     extra.push(LogEvent::ActionStart {
         tick,

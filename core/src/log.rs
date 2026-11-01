@@ -5,7 +5,7 @@ use crate::needs::Needs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const LOG_VERSION: u32 = 7;
+pub const LOG_VERSION: u32 = 8;
 
 /// 决策的因素分解：系统能"报告原因"的载体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +67,10 @@ pub enum LogEvent {
         choice: String,
         factors: FactorBreakdown,
         temperature: f64,
+        /// 童年实时模仿（M6 二阶段）：true = 这次选择来自"跟着父母做"，
+        /// 而非 softmax（决策因素分解照常记录）。
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        imitated: bool,
     },
     ActionStart {
         tick: u64,
@@ -257,6 +261,16 @@ pub enum LogEvent {
         won: bool,
         conditions: Vec<crate::scenario::ConditionState>,
     },
+    /// 离场（M6 二阶段，人口退出）：代理离开小镇（年迈/迁出）——
+    /// 不是死亡：记忆与关系保留，故事里他还是"去了别的城市的人"。
+    Depart {
+        tick: u64,
+        agent: u32,
+        /// 离场原因（年迈 / 外出谋生——数据文案由呈现层映射）。
+        reason: String,
+        /// 离场时的年龄（模拟日）。
+        age_days: f64,
+    },
     Summary {
         agents: Vec<AgentSummary>,
         areas: Vec<AreaSummary>,
@@ -292,6 +306,9 @@ pub struct AgentSummary {
     /// 恋人名字（M5 二阶段；无 = None）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lover: Option<String>,
+    /// 离场标记（M6 二阶段）：Some(离场拍) = 已离开小镇。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departed_tick: Option<u64>,
 }
 
 /// 日志收集器：开发与常规运行写入内存最后落盘；基准模式关闭以测纯模拟性能。

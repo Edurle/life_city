@@ -77,7 +77,7 @@ function parseLog(text) {
     if (ev.t === "goal_set" || ev.t === "goal_resist" || ev.t === "goal_violation" || ev.t === "goal_end") {
       m4Events.push(ev); A(agents, ev.agent).goalEvents.push(ev); continue;
     }
-    if (ev.t === "theft" || ev.t === "job_change" || ev.t === "couple" || ev.t === "born") { m4Events.push(ev); continue; }
+    if (ev.t === "theft" || ev.t === "job_change" || ev.t === "couple" || ev.t === "born" || ev.t === "depart") { m4Events.push(ev); continue; }
     if (ev.t === "social_pick") { A(agents, ev.agent).socialPicks.push(ev); continue; }
     if (ev.t === "imitate") { A(agents, ev.observer).imitations.push(ev); continue; }
     if (ev.t === "exposure") { m4Events.push(ev); A(agents, ev.agent).exposures.push(ev); continue; }
@@ -286,6 +286,7 @@ function renderGroupFeed() {
       ? `💗 ${nameOf(DATA.agents, g.a)} 和 ${nameOf(DATA.agents, g.b)} 在一起了`
       : `💔 ${nameOf(DATA.agents, g.a)} 和 ${nameOf(DATA.agents, g.b)} 分开了`;
     else if (g.t === "born") html = `👶 ${nameOf(DATA.agents, g.mother)} 和 ${nameOf(DATA.agents, g.father)} 添了新成员 ${who}`;
+    else if (g.t === "depart") html = `🧳 ${who} 离开了小镇（${g.reason}，${g.age_days.toFixed(0)} 岁）`;
     if (html) items.push({tick:g.tick, html});
   }
   items.sort((x,y)=>y.tick-x.tick);

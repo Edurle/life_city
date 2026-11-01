@@ -3,3 +3,4 @@
 godot/.godot/
 godot/bin/*.so
 /saves
+dist/

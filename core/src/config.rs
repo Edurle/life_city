@@ -375,6 +375,24 @@ pub struct Params {
     /// 防止高频行为的权重无限增长把 softmax 压成单选。
     #[serde(default = "d_habit_weight_cap")]
     pub habit_weight_cap: f64,
+    // ---------- M6 二阶段：童年实时模仿与人口退出 ----------
+    /// 童年实时模仿概率：孩子心跳决策时，父母正在做自己也做得了的事，
+    /// 按此概率直接跟着做（跟在父母身边做同样的事）。0 = 关闭。
+    #[serde(default = "d_child_imitate_prob")]
+    pub child_imitate_prob: f64,
+    /// 年迈离场起点（模拟日，0 = 关闭）：过了这个年龄每天按 depart_prob
+    /// 掷离场——人口有出有进，多年代模拟的老镇不会只剩老人。
+    #[serde(default)]
+    pub depart_age_days: u64,
+    /// 年迈离场的每日概率。
+    #[serde(default = "d_depart_prob")]
+    pub depart_prob: f64,
+    /// 迁出门槛：无业成年人的经济压力须高于此值才考虑离开（>1 = 永不迁出）。
+    #[serde(default = "d_emigrate_pressure_above")]
+    pub emigrate_pressure_above: f64,
+    /// 迁出的每日概率（满足门槛时掷）。
+    #[serde(default = "d_emigrate_prob")]
+    pub emigrate_prob: f64,
 }
 
 fn d_room() -> f64 {
@@ -535,6 +553,18 @@ fn d_observe_radius() -> f64 {
 }
 fn d_habit_weight_cap() -> f64 {
     12.0
+}
+fn d_child_imitate_prob() -> f64 {
+    0.5
+}
+fn d_depart_prob() -> f64 {
+    0.01
+}
+fn d_emigrate_pressure_above() -> f64 {
+    1.1
+}
+fn d_emigrate_prob() -> f64 {
+    0.005
 }
 fn d_lighting() -> f64 {
     0.5
@@ -945,6 +975,21 @@ pub fn validate(cfg: &SimConfig) -> Result<(), String> {
     }
     if p.goal_decay_mult < 1.0 {
         return Err("目标压制倍率应 ≥ 1".into());
+    }
+    // M6 二阶段：童年模仿与人口退出的概率参数。
+    if !(0.0..=1.0).contains(&p.child_imitate_prob) {
+        return Err("童年实时模仿概率应在 0..1".into());
+    }
+    for (name, v) in [
+        ("年迈离场概率", p.depart_prob),
+        ("迁出概率", p.emigrate_prob),
+    ] {
+        if !(0.0..=1.0).contains(&v) {
+            return Err(format!("{name}应在 0..1"));
+        }
+    }
+    if p.emigrate_pressure_above < 0.0 {
+        return Err("迁出压力门槛不应为负".into());
     }
     Ok(())
 }

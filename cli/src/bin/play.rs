@@ -333,6 +333,10 @@ fn draw_panel(world: &World, player: &str) {
         _ => "（背景）",
     };
     for other in world.agents.iter().skip(1).take(5) {
+        if !other.present() {
+            println!("🧳 {}：已离开小镇", other.name);
+            continue;
+        }
         let act = match &other.current {
             Some((bid, _, _)) => behavior_name(world, bid),
             None => "闲着".to_string(),

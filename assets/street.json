@@ -50,7 +50,9 @@
     "close_friend_bond": 0.75,
     "goal_resist_cost": 6.0,
     "goal_break_cost": 15.0,
-    "goal_decay_mult": 4.0
+    "goal_decay_mult": 4.0,
+    "depart_age_days": 300,
+    "depart_prob": 0.0025
   },
   "areas": [
     {
@@ -1213,9 +1215,24 @@
       "from": 9,
       "to": 18,
       "child": {
-        "type": "action",
-        "behavior": "go_to_work"
+        "type": "job_gate",
+        "job": "office_worker",
+        "child": {
+          "type": "action",
+          "behavior": "go_to_work"
+        }
       }
     }
-  }
+  },
+  "jobs": [
+    {
+      "id": "office_worker",
+      "name": "写字间职员",
+      "work_behavior": "go_to_work",
+      "salary": 120,
+      "slots": 6,
+      "switch_weight": 1.0,
+      "honesty_bias": 0.2
+    }
+  ]
 }

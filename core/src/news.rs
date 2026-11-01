@@ -96,6 +96,23 @@ pub fn news_text(
                 name_of(*agent)
             ))
         }
+        // M6 二阶段：人口退出——离场不是丧事，是"去了别的城市"的送行。
+        LogEvent::Depart {
+            tick,
+            agent,
+            reason,
+            ..
+        } => {
+            let when = format_clock(*tick);
+            let why = match reason.as_str() {
+                "外出谋生" => "要去大城市闯闯",
+                _ => "说是去乡下享清福",
+            };
+            Some(format!(
+                "{when}【送行】{}收拾了行李离开小镇——{why}，街坊都来道别",
+                name_of(*agent)
+            ))
+        }
         _ => None,
     }
 }

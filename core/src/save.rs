@@ -29,13 +29,15 @@ pub struct SaveState {
     pub world_seed: u64,
     /// 物种索引（M5 二阶段）。
     pub species_index: Vec<String>,
+    /// 离场索引（M6 二阶段）。
+    pub departed_index: Vec<bool>,
     pub decisions_done: u64,
     /// 年度统计与关卡（M6）。
     pub stats: crate::world::TownStats,
     pub scenario: Option<crate::scenario::ActiveScenario>,
 }
 
-pub const SAVE_VERSION: u32 = 7;
+pub const SAVE_VERSION: u32 = 8;
 
 impl World {
     /// 导出二进制快照。
@@ -52,6 +54,7 @@ impl World {
             life_rng: self.life_rng.clone(),
             world_seed: self.world_seed,
             species_index: self.species_index.clone(),
+            departed_index: self.departed_index.clone(),
             decisions_done: self.decisions_done,
             stats: self.stats.clone(),
             scenario: self.scenario.clone(),
@@ -93,6 +96,7 @@ impl World {
             life_rng: state.life_rng,
             world_seed: state.world_seed,
             species_index: state.species_index,
+            departed_index: state.departed_index,
             logger: Logger::new(true),
             decisions_done: state.decisions_done,
             stats: state.stats,

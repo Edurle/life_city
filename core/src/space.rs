@@ -60,6 +60,20 @@ impl SpatialGrid {
         self.positions.get(&id).copied()
     }
 
+    /// 移出代理（M6 人口退出：离场者不再占据空间——
+    /// 事件半径、目睹、社交寻人都查不到他）。再 move_to 即重新插入。
+    pub fn remove(&mut self, id: u32) {
+        if let Some(old) = self.positions.remove(&id) {
+            let cell = self.cell_of(old);
+            if let Some(v) = self.cells.get_mut(&cell) {
+                v.retain(|&x| x != id);
+                if v.is_empty() {
+                    self.cells.remove(&cell);
+                }
+            }
+        }
+    }
+
     /// 半径查询：距离 ≤ r 的全部代理（按编号升序，结果顺序确定）。
     pub fn query_radius(&self, center: Pos, r: f64) -> Vec<u32> {
         let r2 = r * r;

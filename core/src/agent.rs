@@ -106,6 +106,20 @@ pub struct Agent {
     /// 当前动作选中的变体（与 current 同生命周期）。
     #[serde(default)]
     pub current_variant: Option<String>,
+    // ---------- M6 二阶段 ----------
+    /// 父母（出生时记录，建镇元老为 None）：童年实时模仿的线索来源，
+    /// 也是"这是谁家的孩子"的查询入口。编号即下标，离场不清除。
+    /// 注意：不能用 skip_serializing_if——bincode 是位置格式，跳过字段会错位。
+    #[serde(default)]
+    pub parents: Option<(u32, u32)>,
+    /// 离场拍（M6 人口退出）：离场后不再参与任何模拟，但记忆与关系保留——
+    /// 活人对离去者的记忆仍在（怀念的素材），id=下标的不变量也不破坏。
+    #[serde(default)]
+    pub departed_tick: Option<Tick>,
+    /// 本次决策的模仿来源（M6 童年实时模仿）：行为开始时据此移动到父母身边。
+    /// 瞬时状态，决策时清空重设。
+    #[serde(default)]
+    pub imitate_from: Option<u32>,
     pub rng_decision: Rng,
 }
 
@@ -159,6 +173,7 @@ impl Agent {
         parents: Option<(&Agent, &Agent)>,
         birth_tick: i64,
     ) -> Self {
+        let parent_ids = parents.map(|(pa, pb)| (pa.id, pb.id));
         let mut rng_ind = Rng::seeded(derive_seed(world_seed, id, STREAM_INDIVIDUAL));
         let temperature = rng_ind.uniform(params.temperature_min, params.temperature_max);
         // 建镇元老出生在"开镇前一个童年"：开镇即成年（parents 为 None 时
@@ -233,6 +248,9 @@ impl Agent {
             variant_weights,
             variant_execs: BTreeMap::new(),
             current_variant: None,
+            parents: parent_ids,
+            departed_tick: None,
+            imitate_from: None,
             rng_decision: Rng::seeded(derive_seed(world_seed, id, STREAM_DECISION)),
         }
     }
@@ -250,6 +268,11 @@ impl Agent {
     /// 老年（可塑性下降 + 怀旧，设计稿 4.8）。
     pub fn is_elder(&self, params: &Params, tick: Tick) -> bool {
         self.age_days(tick) >= params.old_age_days as f64
+    }
+
+    /// 是否仍在镇上（M6 人口退出：离场者保留在数组里但不再活动）。
+    pub fn present(&self) -> bool {
+        self.departed_tick.is_none()
     }
 
     /// 记忆可塑性：童年 ×child_plasticity，成年 1.0，老年 ×elder_plasticity。
