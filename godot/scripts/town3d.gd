@@ -27,11 +27,13 @@ const SUN_DIR0 := Vector3(0.4523, 1.2798, 0.6483)   # (0.30,0.85,0.43) 归一化
 var cam_yaw := 0
 var cam_offset_tgt := Vector3.ZERO
 var toon_mats: Array[ShaderMaterial] = []
+var fx_mats: Array[ShaderMaterial] = []
 var sun_node: DirectionalLight3D
 var clock_label: Label
 var ui_timer := 0.0
 var screenshot_after := -1.0
 var no_toon := false          # --no-toon：直接用 GLB 自带烘焙贴图（外部查看器视角）
+var windows_on := false       # --windows：立面窗户/店面图案（默认纯色模式）
 var agent_count := 0
 var species_bytes := PackedByteArray()
 # 视觉平滑：核心里"位置由行为决定"（开始行为即就位，路上时间不建模），
@@ -55,6 +57,8 @@ func _ready() -> void:
 			screenshot_after = arg.substr(19).to_float()
 		elif arg == "--no-toon":
 			no_toon = true
+		elif arg == "--windows":
+			windows_on = true
 	if screenshot_after > 0.0:
 		get_window().size = Vector2i(1920, 1080)
 	sim.start(42, cfg_path, 14, 3)
@@ -148,6 +152,7 @@ func _toon_mat_inner(m: Material, fs: Shader, xs: Shader, ss: Shader) -> ShaderM
 		sm.set_shader_parameter("win_color", _v3(Color(p[2])))
 		sm.set_shader_parameter("accent_color", _v3(Color(p[3])))
 		sm.set_shader_parameter("bldg_h", p[4].to_float())
+		fx_mats.push_back(sm)
 		return sm
 	if nm.begins_with("stripe|"):
 		var p := nm.split("|")
@@ -304,6 +309,9 @@ func _build_ui() -> void:
 		btn.text = ("⏸" if speed == 0 else "×%d" % speed)
 		btn.pressed.connect(func(): sim.set_speed_mult(float(speed)))
 		hbox.add_child(btn)
+	if windows_on:
+		for m in fx_mats:
+			m.set_shader_parameter("windows_on", true)
 	sim.set_speed_mult(100.0 if screenshot_after > 0.0 else 1.0)
 
 func _process(delta: float) -> void:

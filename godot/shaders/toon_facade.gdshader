@@ -10,6 +10,9 @@ uniform vec3 accent_color : source_color = vec3(0.8);
 uniform vec3 glass_color : source_color = vec3(0.43, 0.53, 0.63);
 uniform vec3 roof_color : source_color = vec3(0.45, 0.44, 0.42);
 uniform float bldg_h = 6.0;
+// 纯色模式（默认）：窗户/店面图案全关，楼 = 墙色 + 深屋顶。
+// 游戏成型后上真贴图前，可先用 --windows 开回程序化细节。
+uniform bool windows_on = false;
 uniform vec3 shadow_tint : source_color = vec3(0.42, 0.46, 0.74);
 uniform float lit_boost = 1.15;
 uniform float cut : hint_range(-1.0, 1.0) = 0.40;
@@ -24,9 +27,10 @@ void fragment() {
 	float band = step(0.9, fz) * (1.0 - step(2.35, fz)) * step(3.0, zb);
 	float wx = step(0.6, mod(p.x, 2.8)) * (1.0 - step(2.1, mod(p.x, 2.8)));
 	float wz = step(0.6, mod(p.z, 2.8)) * (1.0 - step(2.1, mod(p.z, 2.8)));
-	float win = band * max(wx, wz) * side;
-	float gz = step(0.5, zb) * (1.0 - step(2.4, zb)) * side;
-	float ground = (1.0 - step(3.0, zb)) * side;
+	float won = float(windows_on);
+	float win = band * max(wx, wz) * side * won;
+	float gz = step(0.5, zb) * (1.0 - step(2.4, zb)) * side * won;
+	float ground = (1.0 - step(3.0, zb)) * side * won;
 	float roof = step(0.55, n.y);
 	vec3 base = mix(wall_color, accent_color, ground);
 	base = mix(base, glass_color, gz);
