@@ -26,6 +26,9 @@ struct SimNode {
     agent_count: usize,
     /// 剩余的零头拍（帧间隔 × 速度常带小数）。
     carry: f64,
+    /// 日志流关联用：每个代理最近开始的行为（行为, 变体）——
+    /// 消费发生在行为完成时，用它可以报出"钱花在了什么上"。
+    last_action: std::collections::BTreeMap<u32, (String, Option<String>)>,
     #[var]
     speed: f64,
     #[var]
@@ -39,6 +42,7 @@ impl INode for SimNode {
             sim: None,
             agent_count: 0,
             carry: 0.0,
+            last_action: std::collections::BTreeMap::new(),
             speed: 1.0,
             paused: false,
         }
@@ -462,6 +466,8 @@ impl SimNode {
 
     /// 小镇动态流（3D 客户端日志区）：居民动作 + 经济 + 治安 + 关系 + 环境事件。
     /// 每次调用消费缓冲，行格式 "类别\t文字"；类别驱动客户端着色。
+    /// 消费行关联到行为（"消费 ¥8 买零食（薯片）"）——核心的 Wallet 事件
+    /// 只有金额，用代理最近开始的行为补上"买了什么"。
     /// 遥测类事件（决策因素/快照/记忆写入等）不进流——那是 viewer 的活。
     #[func]
     fn drain_town_feed(&mut self) -> PackedStringArray {
@@ -471,11 +477,22 @@ impl SimNode {
         };
         sim.collect_recent = true;
         let events: Vec<living_core::LogEvent> = sim.recent_events.drain(..).collect();
+        let mut last = self.last_action.clone();
         for ev in events {
-            if let Some((cat, text)) = town_feed_line(sim, ev) {
+            if let living_core::LogEvent::ActionStart {
+                agent,
+                ref behavior,
+                ref variant,
+                ..
+            } = ev
+            {
+                last.insert(agent, (behavior.clone(), variant.clone()));
+            }
+            if let Some((cat, text)) = town_feed_line(sim, &last, ev) {
                 out.push(format!("{cat}\t{text}").as_str());
             }
         }
+        self.last_action = last;
         out
     }
 
@@ -526,8 +543,28 @@ fn feed_action(sim: &World, behavior: &str, variant: Option<&str>) -> String {
     format!("{}{v}", feed_behavior(sim, behavior))
 }
 
+/// 行为的执行价（含变体价）；0/无价返回 None。
+fn feed_price(sim: &World, behavior: &str, variant: Option<&str>) -> Option<f64> {
+    let def = sim.cfg.behaviors.iter().find(|b| b.id == behavior)?;
+    let vdef = variant.and_then(|v| def.variants.iter().find(|x| x.id == v));
+    let price = vdef.map(|v| v.price(def.cost)).unwrap_or(def.cost);
+    (price > 0.0).then_some(price)
+}
+
+/// 本职工作的班次工资（其他职业的工作行为不给标注——干了也没钱）。
+fn feed_salary(sim: &World, agent: u32, behavior: &str) -> Option<f64> {
+    let a = sim.agents.get(agent as usize)?;
+    let job = a.job.as_ref()?;
+    let jd = sim.cfg.jobs.iter().find(|j| &j.id == job)?;
+    (jd.work_behavior == behavior && jd.salary > 0.0).then_some(jd.salary)
+}
+
 /// 一条事件 → (类别, 文字)；None = 不进流。
-fn town_feed_line(sim: &World, ev: living_core::LogEvent) -> Option<(&'static str, String)> {
+fn town_feed_line(
+    sim: &World,
+    last: &std::collections::BTreeMap<u32, (String, Option<String>)>,
+    ev: living_core::LogEvent,
+) -> Option<(&'static str, String)> {
     use living_core::LogEvent;
     let clock = living_core::time::format_clock;
     match ev {
@@ -537,23 +574,41 @@ fn town_feed_line(sim: &World, ev: living_core::LogEvent) -> Option<(&'static st
             behavior,
             variant,
             ..
-        } => Some((
-            "act",
-            format!("{} {} 开始 {}", clock(tick), feed_name(sim, agent), feed_action(sim, &behavior, variant.as_deref())),
-        )),
+        } => {
+            // 经济可见性：带价行为标注"完成时扣多少"，本职工作标注班次工资——
+            // 钱都在行为完成那一刻动，先说清楚免得像"没扣钱"。
+            let mut note = String::new();
+            if let Some(p) = feed_price(sim, &behavior, variant.as_deref()) {
+                note = format!(" · 完成 −¥{p:.0}");
+            } else if let Some(s) = feed_salary(sim, agent, &behavior) {
+                note = format!(" · 班次 +¥{s:.0}");
+            }
+            Some((
+                "act",
+                format!(
+                    "{} {} 开始 {}{note}",
+                    clock(tick),
+                    feed_name(sim, agent),
+                    feed_action(sim, &behavior, variant.as_deref())
+                ),
+            ))
+        }
         LogEvent::Wallet {
             tick, agent, delta, value,
-        } => Some((
-            "money",
-            format!(
-                "{} {} {}¥{:.0}（余 ¥{:.0}）",
-                clock(tick),
-                feed_name(sim, agent),
-                if delta >= 0.0 { "入账" } else { "消费" },
-                delta.abs(),
-                value
-            ),
-        )),
+        } => {
+            let what = last
+                .get(&agent)
+                .map(|(b, v)| feed_action(sim, b, v.as_deref()))
+                .unwrap_or_default();
+            Some((
+                "money",
+                if delta < 0.0 {
+                    format!("{} {} 消费 ¥{:.0}（{}），余 ¥{:.0}", clock(tick), feed_name(sim, agent), delta.abs(), what, value)
+                } else {
+                    format!("{} {} 入账 +¥{:.0}，余 ¥{:.0}", clock(tick), feed_name(sim, agent), delta, value)
+                },
+            ))
+        },
         LogEvent::Theft {
             tick, thief, victim, amount, caught, area,
         } => {

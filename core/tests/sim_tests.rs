@@ -3170,3 +3170,38 @@ fn jobless_never_perform_work_behavior() {
     let total: u64 = w.agents.iter().map(|a| a.exec_counts.get("go_to_work").copied().unwrap_or(0)).sum();
     assert!(total > 0, "在岗者照常上班：{total}");
 }
+
+// ---------- M8：指令消费扣款与时间门提示 ----------
+
+#[test]
+fn commanded_paid_behavior_charges_wallet() {
+    let mut w = town_world(9, 4);
+    w.agents[0].wallet = 100.0;
+    w.agents[0].needs = living_core::needs::Needs::full();
+    w.agents[0].current = None;
+    // 夜里（开局 0 点）：买零食挂在 7–22 时间门下——拒绝，且提示报营业时间
+    //（M8：此前只说"现在做不了"，玩家看不出是小店夜里不开门）。
+    let night = w.issue_command(0, "buy_snack");
+    assert!(!night.accepted);
+    assert!(
+        night.reason.contains("营业时间"),
+        "夜里应报营业时间：{}",
+        night.reason
+    );
+    // 白天（10 点）：接受；扣款发生在行为完成那一刻（变体价 8/13 或基准 18）。
+    while living_core::time::hour_of(w.tick) != 10 {
+        w.tick();
+    }
+    w.agents[0].needs = living_core::needs::Needs::full();
+    w.agents[0].current = None;
+    let out = w.issue_command(0, "buy_snack");
+    assert!(out.accepted, "白天应接受：{}", out.reason);
+    let before = w.agents[0].wallet;
+    w.run(60);
+    let after = w.agents[0].wallet;
+    assert!(after < before, "买零食完成后应扣款：{before} -> {after}");
+    assert!(
+        before - after <= 18.0,
+        "最多扣基准价 18：{before} -> {after}"
+    );
+}

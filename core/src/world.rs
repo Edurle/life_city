@@ -38,7 +38,7 @@
 
 use crate::agent::Agent;
 use crate::area::AreaState;
-use crate::config::{BehaviorDef, Params, SimConfig, SpotDef, VariantDef};
+use crate::config::{BehaviorDef, Params, SimConfig, SpotDef, TreeNode, VariantDef};
 use crate::goal::Goal;
 use crate::log::{AgentSummary, AreaSummary, FactorBreakdown, LogEvent, Logger, LOG_VERSION};
 use crate::needs::{urgency, Needs, NEED_KEYS};
@@ -2380,7 +2380,15 @@ impl World {
                     0.0,
                     Some(format!(
                         "它现在没这个念头（{}）",
-                        gate_note(&self.cfg, &def)
+                        gate_note(
+                            &self.cfg,
+                            &a.species,
+                            &a.needs,
+                            a.job.as_deref(),
+                            self.relations.couple_of(a.id).is_some(),
+                            &def,
+                            tick
+                        )
                     )),
                     false,
                     false,
@@ -2558,7 +2566,15 @@ impl World {
                         name: def.display_name().to_string(),
                         available: false,
                         est_cost: 0.0,
-                        gate_note: gate_note(&self.cfg, def),
+                        gate_note: gate_note(
+                            &self.cfg,
+                            &species,
+                            &a.needs,
+                            a.job.as_deref(),
+                            self.relations.couple_of(a.id).is_some(),
+                            def,
+                            tick,
+                        ),
                         automated: a.is_automated(&bid, auto_ratio),
                         feared: false,
                         goal_avoided: a.active_goal_idx(&bid, tick).is_some(),
@@ -3370,8 +3386,18 @@ fn tree_uses_jobs(
     }
 }
 
-/// 需求门未开时给玩家看的提示文字。
-fn gate_note(_cfg: &SimConfig, def: &BehaviorDef) -> String {
+/// 需求门未开时给玩家看的提示文字（指令拒绝文案与菜单悬停共用）。
+/// 树感知（M8）：优先报时间窗（"夜里小店不开门"是玩家最需要的信息），
+/// 其次需求门（"它现在不饿"）、职业/伴侣门；都不是才说"现在做不了"。
+fn gate_note(
+    cfg: &SimConfig,
+    species: &str,
+    needs: &crate::needs::Needs,
+    job: Option<&str>,
+    has_mate: bool,
+    def: &BehaviorDef,
+    tick: Tick,
+) -> String {
     let words = [
         ("hunger", "它现在不饿"),
         ("energy", "它现在不困"),
@@ -3380,13 +3406,147 @@ fn gate_note(_cfg: &SimConfig, def: &BehaviorDef) -> String {
         ("hygiene", "它不脏"),
         ("bladder", "它不急"),
     ];
-    match &def.gate_need {
-        Some(need) => words
+    let need_word = |k: &str| {
+        words
             .iter()
-            .find(|(k, _)| k == need)
-            .map(|(_, w)| w.to_string())
-            .unwrap_or_else(|| format!("条件未满足：{need}")),
-        None => "现在做不了".to_string(),
+            .find(|(w, _)| *w == k)
+            .map(|(_, s)| (*s).to_string())
+            .unwrap_or_else(|| format!("条件未满足：{k}"))
+    };
+    let mut paths: Vec<PathGates> = Vec::new();
+    collect_paths(
+        cfg.tree_for(species),
+        &cfg.subtrees,
+        &def.id,
+        PathGates::default(),
+        &mut paths,
+    );
+    if paths.is_empty() {
+        return def
+            .gate_need
+            .as_deref()
+            .map(need_word)
+            .unwrap_or_else(|| "现在做不了".to_string());
+    }
+    let hour = crate::time::hour_of(tick) as u32;
+    let time_open = |p: &PathGates| {
+        p.windows.is_empty() || p.windows.iter().any(|(f, t)| hour_in_window(*f, *t, hour))
+    };
+    // 时间窗全关：报营业时间（多条路径的窗口去重后并列）。
+    if !paths.iter().any(time_open) {
+        let mut wins: Vec<String> = Vec::new();
+        for p in &paths {
+            for (f, t) in &p.windows {
+                let s = format!("{f}–{t}");
+                if !wins.contains(&s) {
+                    wins.push(s);
+                }
+            }
+        }
+        return format!("营业时间 {} 点（现在 {} 点）", wins.join(" 或 "), hour);
+    }
+    // 时间开着但路径全被别的门挡住：依次找未满足的需求门 / 职业门 / 伴侣门。
+    let mut hint: Option<String> = None;
+    let mut any_open = false;
+    for p in paths.iter().filter(|p| time_open(p)) {
+        let needs_ok = p
+            .needs
+            .iter()
+            .all(|(k, b)| needs.get(k).map(|v| v < *b).unwrap_or(true));
+        let job_ok = p
+            .jobs
+            .is_empty()
+            || job.map(|j| p.jobs.iter().any(|x| x == j)).unwrap_or(false);
+        let mate_ok = !p.mates || has_mate;
+        if needs_ok && job_ok && mate_ok {
+            any_open = true;
+            break;
+        }
+        if hint.is_none() {
+            if let Some((k, _)) = p
+                .needs
+                .iter()
+                .find(|(k, b)| needs.get(k).map(|v| v >= *b).unwrap_or(false))
+            {
+                hint = Some(need_word(k));
+            } else if !job_ok {
+                hint = Some(format!("这是 {} 的活儿", p.jobs.join("/")));
+            } else if !mate_ok {
+                hint = Some("它得先有个恋人".to_string());
+            }
+        }
+    }
+    if !any_open {
+        if let Some(h) = hint {
+            return h;
+        }
+    }
+    def.gate_need
+        .as_deref()
+        .map(need_word)
+        .unwrap_or_else(|| "现在做不了".to_string())
+}
+
+/// 一条树路径上的门约束（selector 的每个分支是一条独立路径）。
+#[derive(Default, Clone)]
+struct PathGates {
+    windows: Vec<(u32, u32)>,
+    needs: Vec<(String, f64)>,
+    jobs: Vec<String>,
+    mates: bool,
+}
+
+fn hour_in_window(from: u32, to: u32, hour: u32) -> bool {
+    if from <= to {
+        hour >= from && hour < to
+    } else {
+        hour >= from || hour < to // 跨零点（如 22→6）
+    }
+}
+
+fn collect_paths(
+    n: &TreeNode,
+    subtrees: &BTreeMap<String, TreeNode>,
+    target: &str,
+    cur: PathGates,
+    out: &mut Vec<PathGates>,
+) {
+    match n {
+        TreeNode::Selector { children } => {
+            for c in children {
+                collect_paths(c, subtrees, target, cur.clone(), out);
+            }
+        }
+        TreeNode::Gate { need, below, child } => {
+            let mut p = cur;
+            p.needs.push((need.clone(), *below));
+            collect_paths(child, subtrees, target, p, out);
+        }
+        TreeNode::TimeGate { from, to, child } => {
+            let mut p = cur;
+            p.windows.push((*from, *to));
+            collect_paths(child, subtrees, target, p, out);
+        }
+        TreeNode::JobGate { job, child } => {
+            let mut p = cur;
+            p.jobs.push(job.clone());
+            collect_paths(child, subtrees, target, p, out);
+        }
+        TreeNode::MateGate { child } => {
+            let mut p = cur;
+            p.mates = true;
+            collect_paths(child, subtrees, target, p, out);
+        }
+        TreeNode::Subtree { tree_ref } => {
+            if let Some(t) = subtrees.get(tree_ref) {
+                collect_paths(t, subtrees, target, cur, out);
+            }
+        }
+        TreeNode::Action { behavior } => {
+            if behavior == target {
+                out.push(cur);
+            }
+        }
     }
 }
 
