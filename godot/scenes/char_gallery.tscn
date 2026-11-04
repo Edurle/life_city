@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://living_char_gallery"]
+
+[ext_resource type="Script" path="res://scripts/char_gallery.gd" id="1_gallery"]
+
+[node name="CharGallery" type="Node3D"]
+script = ExtResource("1_gallery")

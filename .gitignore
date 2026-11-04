@@ -4,3 +4,4 @@ godot/.godot/
 godot/bin/*.so
 /saves
 dist/
+godot/gallery_models/
