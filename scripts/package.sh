@@ -33,8 +33,8 @@ echo "==> 组装 $DIST"
 rm -rf "$DIST"
 mkdir -p "$DIST/bin" "$DIST/godot/bin"
 
-# Godot 工程：场景/脚本/工程文件（bin 里只放 release 动态库与扩展描述）。
-cp -r godot/project.godot godot/scenes godot/scripts "$DIST/godot/"
+# Godot 工程：场景/脚本/着色器/3D 资产/工程文件（bin 里只放 release 动态库与扩展描述）。
+cp -r godot/project.godot godot/scenes godot/scripts godot/shaders godot/assets3d "$DIST/godot/"
 cp godot/bin/living_sim.gdextension "$DIST/godot/bin/"
 cp target/release/libgodot_adapter.so "$DIST/godot/bin/"
 

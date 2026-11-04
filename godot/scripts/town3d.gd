@@ -5,7 +5,8 @@
 # 楼群材质按区域声誉染色（红低绿高，健康带不上色）。
 # 指令模式（设计稿 4.2–4.3 的最小竖切）：0 号居民是"你"（金色），选中自己
 # 可下指令——核心按习惯合拍度定价扣意志力，行为树从不否决指令只收代价。
-# 模拟全部住在 Rust 核心（SimNode），本脚本只读快照；代理用 MultiMesh 批量渲染。
+# 模拟全部住在 Rust 核心（SimNode），本脚本只读快照；人类用角色模型（骨骼动画实例，
+# 模型缺失时回退胶囊小人），猫用 MultiMesh 批量渲染。
 extends Node3D
 
 const MAP_W := 56.0
@@ -78,15 +79,42 @@ const FEED_COLORS := {
 	"town": "#d9b8ff", "env": "#bfe3ff", "rep": "#ffc37a", "goal": "#e0b0ff",
 	"cmd": "#ffe08a",
 }
-# 视觉平滑：核心里"位置由行为决定"（开始行为即就位，路上时间不建模），
-# 表现层用指数趋近把跳变抹成连续滑动——核心语义与确定性不动。
+# 视觉移动：核心里"位置由行为决定"（开始行为即就位，路上时间不建模），
+# 表现层把跳变走成连续移动（速度规则见下方人物模型段）——核心语义与确定性不动。
 var visual_pos := PackedVector3Array()
 # 地表高度（GLB 实测：路面 0.16 / 草地 0.17 / 平台 0.15）——代理与光环
 # 要放在地表之上（此前 0.02 会把小腿和环埋进地面）。
 const GROUND_Y := 0.17
 const RING_Y := 0.26          # 光环管底(−0.09)刚好过草面，不埋不飘
-const GLIDE := 3.0        # 每秒收敛约 95%
 const SNAP_SQ := 2500.0   # 距离超过 50m 直接就位（离场哨兵位/初次出现）
+# 人物模型：Mixamo 角色 + 动作由 Blender 合并成单个 GLB（~/Documents/blender_scenes/
+# build_character.py，下面两个原生数值由它打印）。人口上限 40，逐人一个骨骼动画节点无压力。
+# 核心不建模路上时间（开始行为即就位），表现层按步行速度走过去：远了加快到赶路速度，
+# 腿同步加速；速度档越高走得越快，追不上的部分滑行。
+const HUMAN_MODEL := "res://assets3d/characters/ch46.glb"
+const HUMAN_SCALE := 1.0      # 模型身高 1.48 m（height_m）
+const WALK_SPEED := 0.72      # 走路动画的原生速度，米/秒（native_speed_mps）
+const WALK_FAST := 2.5        # 赶路最快到原生速度的 2.5 倍
+const CATCH_UP_S := 3.0       # 按剩余距离约 3 秒走完定速，再夹在 1–2.5 倍原生速度之间
+const ANIM_RATE_MAX := 4.0    # 腿最快 4 倍速（×10/×100 档再快就滑行）
+const TURN_RATE := 10.0       # 转身：每秒指数趋近
+const PLAYER_TINT := 0.35     # 玩家模型染金色的比例
+var human_scene: PackedScene  # null = 回退胶囊小人
+var char_shader: Shader
+var blob_mat: ShaderMaterial
+var blob_mesh: PlaneMesh
+var char_nodes: Array[Node3D] = []           # 与代理同序；猫（及回退时）为 null
+var char_anims: Array[AnimationPlayer] = []
+var char_walking := PackedByteArray()
+var char_yaw := PackedFloat32Array()
+var char_mats := {}           # 源材质 → 卡通材质（全员共用）
+var char_mats_gold := {}      # 玩家专用（金色染色）
+var hidden_xf := Transform3D(Basis.from_scale(Vector3.ZERO), Vector3(0.0, -100.0, 0.0))
+var speed_mult := 1.0         # 当前速度档（走路速度跟着倍率走）
+var run_speed := -1.0         # --speed=N（自检）：启动后的速度档
+var warmup_s := 0.0           # --warmup=秒（自检）：先 ×100 推进这么多现实秒，再切到 --speed
+var zoom_arg := 0.0           # --zoom=N（自检）：相机正交尺寸（默认 42，越小越近）
+var follow_arg := false       # --follow（自检）：配合 --select 启动即跟随
 
 # 游戏坐标（米，y 北）→ Godot 世界（glTF 转换：blender(x,y,z) → godot(x,z,-y)）
 static func g2w(x: float, y: float, h := 0.0) -> Vector3:
@@ -109,6 +137,14 @@ func _ready() -> void:
 			select_arg = arg.substr(9).to_int()
 		elif arg.begins_with("--issue="):
 			issue_debug = arg.substr(8)
+		elif arg.begins_with("--speed="):
+			run_speed = arg.substr(8).to_float()
+		elif arg.begins_with("--warmup="):
+			warmup_s = arg.substr(9).to_float()
+		elif arg.begins_with("--zoom="):
+			zoom_arg = arg.substr(7).to_float()
+		elif arg == "--follow":
+			follow_arg = true
 	if screenshot_after > 0.0:
 		get_window().size = Vector2i(1920, 1080)
 	sim.start(42, cfg_path, 14, 3)
@@ -123,12 +159,16 @@ func _ready() -> void:
 	_build_environment()
 	_build_town()
 	_build_camera()
+	if zoom_arg > 0.0:
+		camera.size = clampf(zoom_arg, 10.0, 90.0)
 	_build_agents()
 	_build_selection_ring()
 	_build_ui()
 	if select_arg >= 0 and select_arg < agent_count:
 		selected = select_arg
 		_refresh_inspect()
+		if follow_arg:
+			_toggle_follow()
 	print("[town3d] 启动：%d 名居民，配置 %s" % [agent_count, cfg_path])
 
 func _build_environment() -> void:
@@ -348,7 +388,11 @@ func _pick_agent(screen_px: Vector2) -> int:
 		var vp: Vector3 = visual_pos[i]
 		if camera.is_position_behind(vp):
 			continue
-		var sp := camera.unproject_position(vp + Vector3(0, 0.55, 0))
+		# 瞄身体中段：人物模型胸口 / 胶囊小人 / 猫（0.6 倍胶囊）
+		var mid := 0.75 * HUMAN_SCALE if char_nodes[i] != null else 0.55
+		if i < species_bytes.size() and species_bytes[i] == 0:
+			mid = 0.33
+		var sp := camera.unproject_position(vp + Vector3(0, mid, 0))
 		var d: float = sp.distance_squared_to(screen_px)
 		if d > TOL_SQ:
 			continue
@@ -541,6 +585,7 @@ func _person_mesh() -> ArrayMesh:
 	return am
 
 func _build_agents() -> void:
+	# MultiMesh 每位代理留一个槽（同序好管）：画猫与回退小人，有模型的人类槽位隐藏。
 	mm = MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
@@ -553,6 +598,90 @@ func _build_agents() -> void:
 	mat.set_shader_parameter("albedo", Vector3.ONE)
 	mmi.material_override = mat
 	add_child(mmi)
+	if ResourceLoader.exists(HUMAN_MODEL):
+		human_scene = load(HUMAN_MODEL)
+		char_shader = load("res://shaders/toon_tex.gdshader")
+		blob_mat = ShaderMaterial.new()
+		blob_mat.shader = load("res://shaders/blob_shadow.gdshader")
+		blob_mesh = PlaneMesh.new()
+		blob_mesh.size = Vector2(0.9, 0.9)
+	else:
+		push_warning("缺少人物模型 %s，人类回退为胶囊小人" % HUMAN_MODEL)
+	_sync_char_nodes()
+
+func _sync_char_nodes() -> void:
+	# 人物节点数组跟上代理数（新生儿只追加）；猫与回退时留 null。
+	var old := char_nodes.size()
+	char_nodes.resize(agent_count)
+	char_anims.resize(agent_count)
+	char_walking.resize(agent_count)
+	char_yaw.resize(agent_count)
+	if human_scene == null:
+		return
+	for i in range(old, agent_count):
+		if i < species_bytes.size() and species_bytes[i] == 1:
+			_spawn_char(i)
+
+func _spawn_char(i: int) -> void:
+	var node: Node3D = human_scene.instantiate()
+	add_child(node)
+	for mi: MeshInstance3D in node.find_children("*", "MeshInstance3D", true, false):
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if not no_toon:
+			_char_retint(mi, i == player_idx)
+	var blob := MeshInstance3D.new()
+	blob.mesh = blob_mesh
+	blob.material_override = blob_mat
+	blob.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	blob.position.y = 0.015
+	node.add_child(blob)
+	var ap: AnimationPlayer = node.find_children("*", "AnimationPlayer", true, false)[0]
+	ap.play("idle")
+	char_nodes[i] = node
+	char_anims[i] = ap
+	char_walking[i] = 0
+	char_yaw[i] = fmod(i * 2.39996, TAU)   # 黄金角错开初始朝向，开局不至于全员一个方向
+	node.transform = Transform3D(Basis(Vector3.UP, char_yaw[i]).scaled(Vector3.ONE * HUMAN_SCALE), visual_pos[i])
+
+func _char_retint(mi: MeshInstance3D, gold: bool) -> void:
+	# GLB 原材质（StandardMaterial3D + 漫反射贴图）→ 贴图版卡通 shader，与楼群同一套光照；
+	# 全员共用一份，玩家另一份染金色（"你"在人群里一眼可辨）。
+	var cache: Dictionary = char_mats_gold if gold else char_mats
+	for s in mi.get_surface_override_material_count():
+		var src: Material = mi.get_active_material(s)
+		if src == null:
+			continue
+		if not cache.has(src):
+			var sm := ShaderMaterial.new()
+			sm.shader = char_shader
+			if src is BaseMaterial3D:
+				sm.set_shader_parameter("albedo_tex", (src as BaseMaterial3D).albedo_texture)
+				sm.set_shader_parameter("albedo", _v3((src as BaseMaterial3D).albedo_color))
+			if gold:
+				sm.set_shader_parameter("tint", Vector3(0.98, 0.80, 0.28))
+				sm.set_shader_parameter("tint_amt", PLAYER_TINT)
+			cache[src] = sm
+		mi.set_surface_override_material(s, cache[src])
+
+func _update_char(i: int, to: Vector3, dist: float, speed: float, delta: float) -> void:
+	var node := char_nodes[i]
+	var vp := visual_pos[i]
+	node.visible = vp.x > -500.0          # 离场者在地图外哨兵位
+	if not node.visible:
+		return
+	var ap := char_anims[i]
+	if speed > 0.0:
+		char_yaw[i] = lerp_angle(char_yaw[i], atan2(to.x, to.z), minf(delta * TURN_RATE, 1.0))
+		ap.speed_scale = minf(speed / (WALK_SPEED * HUMAN_SCALE), ANIM_RATE_MAX)
+		if char_walking[i] == 0:
+			char_walking[i] = 1
+			ap.play("walk", 0.25)
+	elif char_walking[i] == 1:
+		char_walking[i] = 0
+		ap.speed_scale = 1.0
+		ap.play("idle", 0.3)
+	# 模型正面朝 +Z（Mixamo/Blender 前视图朝向经 glTF 换算），yaw = atan2(x, z) 即面向移动方向
+	node.transform = Transform3D(Basis(Vector3.UP, char_yaw[i]).scaled(Vector3.ONE * HUMAN_SCALE), vp)
 
 func _build_ui() -> void:
 	var canvas := CanvasLayer.new()
@@ -570,7 +699,7 @@ func _build_ui() -> void:
 	for speed in [0, 1, 2, 10, 100]:
 		var btn := Button.new()
 		btn.text = ("⏸" if speed == 0 else "×%d" % speed)
-		btn.pressed.connect(func(): sim.set_speed_mult(float(speed)))
+		btn.pressed.connect(func(): _set_speed(float(speed)))
 		hbox.add_child(btn)
 	# 一键选中自己（与点击金色小人同效）——玩家在楼里上班点不到时也能下指令。
 	var me_btn := Button.new()
@@ -653,7 +782,16 @@ func _build_ui() -> void:
 			m.set_shader_parameter("windows_on", true)
 		for m in st_mats:
 			m.set_shader_parameter("stripes_on", true)
-	sim.set_speed_mult(100.0 if screenshot_after > 0.0 else 1.0)
+	if warmup_s > 0.0:
+		_set_speed(100.0)
+	elif run_speed >= 0.0:
+		_set_speed(run_speed)
+	else:
+		_set_speed(100.0 if screenshot_after > 0.0 else 1.0)
+
+func _set_speed(mult: float) -> void:
+	speed_mult = mult
+	sim.set_speed_mult(mult)
 
 func _process(delta: float) -> void:
 	# 键盘平移（WASD / 方向键）
@@ -676,21 +814,34 @@ func _process(delta: float) -> void:
 		if screenshot_after <= 0.0:
 			_capture_and_quit()
 			return
+	if warmup_s > 0.0:
+		warmup_s -= delta
+		if warmup_s <= 0.0:
+			_set_speed(run_speed if run_speed >= 0.0 else 1.0)
 	var positions: PackedVector2Array = sim.agent_positions()
 	if positions.size() != agent_count:
 		_resize_agents(positions.size())
+	var v_walk := WALK_SPEED * HUMAN_SCALE
+	var eff := maxf(speed_mult, 1.0)       # 暂停时没走完的照常走完
 	for i in positions.size():
-		var sp := 1 if i < species_bytes.size() else 0
-		var sc := 1.0 if sp == 1 else 0.6
+		var sp := species_bytes[i] if i < species_bytes.size() else 0
 		var target := g2w(positions[i].x, positions[i].y, GROUND_Y)
 		var vp: Vector3 = visual_pos[i]
-		if vp.distance_squared_to(target) > SNAP_SQ:
+		var to := target - vp
+		var dist := to.length()
+		var speed := 0.0
+		if dist * dist > SNAP_SQ:
 			vp = target
-		else:
-			vp = vp.lerp(target, minf(delta * GLIDE, 1.0))
+		elif dist > 0.0:
+			speed = clampf(dist / CATCH_UP_S, v_walk, v_walk * WALK_FAST) * eff
+			vp = vp.move_toward(target, speed * delta)
 		visual_pos[i] = vp
-		var basis := Basis().scaled(Vector3(sc, sc, sc))
-		mm.set_instance_transform(i, Transform3D(basis, vp))
+		if char_nodes[i] != null:
+			_update_char(i, to, dist, speed, delta)
+			mm.set_instance_transform(i, hidden_xf)
+			continue
+		var sc := 1.0 if sp == 1 else 0.6
+		mm.set_instance_transform(i, Transform3D(Basis().scaled(Vector3(sc, sc, sc)), vp))
 		if i == player_idx:
 			mm.set_instance_color(i, Color(0.98, 0.80, 0.28))   # 你 = 金色
 		else:
@@ -715,8 +866,8 @@ func _process(delta: float) -> void:
 		_refresh_inspect()
 		_refresh_commands()
 		_poll_town_feed()
-		if issue_debug != "":
-			# --issue=行为id（自检）：给玩家自动下一条指令，看反馈与意志力结算。
+		if issue_debug != "" and warmup_s <= 0.0:
+			# --issue=行为id（自检）：给玩家自动下一条指令（有 --warmup 时等预热结束），看反馈与意志力结算。
 			_issue(issue_debug)
 			issue_debug = ""
 
@@ -732,6 +883,7 @@ func _resize_agents(n: int) -> void:
 		var target := g2w(positions[i].x, positions[i].y, GROUND_Y)
 		visual_pos[i] = old_visual[i] if i < old_visual.size() else target
 	mm.instance_count = n
+	_sync_char_nodes()
 
 func _capture_and_quit() -> void:
 	await RenderingServer.frame_post_draw
