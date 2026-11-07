@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>《活城》行为树查看器</title>
+<style>
+  :root { --bg:#1b1e24; --panel:#242830; --line:#3a3f4b; --text:#d8dce4; --dim:#8a91a0; --accent:#7aa2f7; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "PingFang SC","Microsoft YaHei",sans-serif; display:flex; flex-direction:column; height:100vh; }
+  header { padding:8px 14px; border-bottom:1px solid var(--line); display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; color:var(--accent); white-space:nowrap; }
+  .filelabel { border:1px dashed var(--dim); border-radius:6px; padding:4px 10px; color:var(--dim); font-size:12.5px; cursor:pointer; }
+  .filelabel.ok { border-color:var(--accent); color:var(--accent); }
+  #meta { color:var(--dim); font-size:12px; }
+  #toolbar { padding:6px 14px; border-bottom:1px solid var(--line); display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .tab { padding:3px 11px; border:1px solid var(--line); border-radius:13px; cursor:pointer; background:var(--panel); font-size:12.5px; }
+  .tab.active { border-color:var(--accent); color:var(--accent); }
+  button { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:3px 10px; cursor:pointer; font-size:12.5px; }
+  button:hover { border-color:var(--accent); }
+  select, input[type=number] { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:3px 6px; font-size:12.5px; }
+  #livebar { padding:5px 14px; border-bottom:1px solid var(--line); display:none; gap:12px; align-items:center; flex-wrap:wrap; font-size:12.5px; }
+  #livebar.on { display:flex; }
+  #tick { width:340px; accent-color:var(--accent); }
+  #clock { color:var(--accent); min-width:96px; }
+  #layout { flex:1; display:flex; min-height:0; }
+  #stage { flex:1; position:relative; overflow:hidden; cursor:grab; }
+  #stage:active { cursor:grabbing; }
+  svg { display:block; width:100%; height:100%; }
+  #side { width:330px; border-left:1px solid var(--line); overflow-y:auto; padding:10px 12px; flex-shrink:0; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:10px; }
+  .card h3 { margin:0 0 6px; font-size:12.5px; color:var(--dim); font-weight:normal; }
+  .kv { display:flex; justify-content:space-between; gap:8px; font-size:12.5px; padding:1.5px 0; }
+  .kv span:first-child { color:var(--dim); }
+  .hint { color:var(--dim); }
+  #avlist div { padding:3px 4px; border-bottom:1px solid var(--line); font-size:12.5px; cursor:pointer; display:flex; justify-content:space-between; gap:6px; }
+  #avlist div:hover { background:#2a2f38; }
+  #avlist .w { color:var(--dim); font-variant-numeric:tabular-nums; }
+  .star { color:#e0af68; }
+  #legend { padding:4px 14px 8px; font-size:11.5px; color:var(--dim); display:flex; gap:10px; flex-wrap:wrap; }
+  .sw { width:10px; height:10px; border-radius:2px; display:inline-block; vertical-align:-1px; margin-right:3px; }
+  text { user-select:none; }
+  #errmsg { color:#f7768e; font-size:12.5px; padding:4px 14px; display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>《活城》· 行为树查看器</h1>
+  <label class="filelabel" id="cfglabel">① 配置 JSON（town/street/cats）<input id="cfgfile" type="file" accept=".json" hidden></label>
+  <label class="filelabel" id="loglabel">② 日志 JSONL（可选，开实时门评估）<input id="logfile" type="file" accept=".jsonl" hidden></label>
+  <span id="meta"></span>
+</header>
+<div id="toolbar">
+  <span id="tabs"></span>
+  <span style="flex:1"></span>
+  <button id="expandAll">展开全部</button>
+  <button id="collapseAll">收起子树</button>
+  <button id="zoomFit">适配</button>
+  <button id="zoomIn">＋</button>
+  <button id="zoomOut">－</button>
+</div>
+<div id="livebar">
+  <span>代理</span><select id="agentSel"></select>
+  <span>时间</span><input id="tick" type="range" min="0" max="1439" value="0"><input id="tickNum" type="number" min="0" step="10" style="width:76px">
+  <span id="clock"></span>
+  <button id="play">▶ 播放</button>
+  <span id="agentInfo" class="hint"></span>
+</div>
+<div id="legend"></div>
+<div id="errmsg"></div>
+<div id="layout">
+  <div id="stage"><svg id="svg"><g id="world"></g></svg></div>
+  <div id="side">
+    <div class="card"><h3>节点详情</h3><div id="detail" class="hint">点击树上的节点查看。</div></div>
+    <div class="card"><h3 id="avtitle">行为</h3><div id="avlist" class="hint"></div></div>
+    <div class="card"><h3>说明</h3>
+      <div class="hint" style="font-size:12px">树结构只决定"此刻哪些行为<b>可用</b>"（各道门的开合）；选中哪个行为由数值层按权重 softmax 决定，不在本图内。<br>
+      载入日志后：门按所选代理在所选时刻的需求 / 时间 / 职业 / 恋爱状态评估（需求与钱包取小时快照线性插值，近似值——不含位置远近、在岗冷静期等瞬时条件）；★ = 该时刻最近一次实际决策。<br>
+      物种与开局职业是从日志反推的（快照权重表的键 ⊆ 各物种树的叶行为；开局分配按核心同款确定性算法重放）。</div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ---------- 常量（与 core 对齐：needs.rs / time.rs / config.rs） ----------
+const NEED_LABELS = {hunger:"饥饿",energy:"精力",fun:"娱乐",social:"社交",hygiene:"卫生",bladder:"如厕"};
+const SPECIES_LABELS = {human:"人类",cat:"猫"};
+// 节点类型 → 显示名 / 主色（背景色自动取低透明度）
+const NODE_STYLE = {
+  selector:  {label:"选择器", color:"#7aa2f7"},
+  gate:      {label:"需求门", color:"#e0af68"},
+  time_gate: {label:"时间门", color:"#bb9af7"},
+  job_gate:  {label:"职业门", color:"#ff9e64"},
+  mate_gate: {label:"伴侣门", color:"#f7768e"},
+  subtree:   {label:"子树",   color:"#73daca"},
+  action:    {label:"行为",   color:"#9ece6a"},
+};
+const NW = 208, NH = 46, LX = 268, ROW_H = 56;
+
+// ---------- 状态 ----------
+let CFG = null;            // 配置 JSON 原文
+let TREES = [];            // [{key:""|"human"|"#子树:x", label, root}]
+let BEHAVIORS = new Map(); // id → def
+let COLLAPSED = new Set(); // 展开状态按节点路径记（换 tab 不丢）
+let curTree = "", selectedPath = null;
+let LOG = null;            // {agents:Map, meta, maxTick, species:Map, initJobs:Map, jobs:Map→事件, couples:[]}
+let liveAgent = 0, liveTick = 0, playing = null;
+let view = {s:1, tx:60, ty:60};
+
+const $ = id => document.getElementById(id);
+const svg = $("svg"), world = $("world");
+
+// ---------- 工具 ----------
+function err(msg){ const e=$("errmsg"); e.textContent = "⚠ " + msg; e.style.display="block"; console.warn(msg); }
+function clearErr(){ const e=$("errmsg"); e.style.display="none"; }
+function needLabel(k){ return NEED_LABELS[k] || k; }
+function fmtTick(t){ const d=Math.floor(t/1440)+1,h=Math.floor(t%1440/60),m=t%60; return `第${d}天 ${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`; }
+function hourOf(t){ return Math.floor((t%1440)/60); }
+function inHourWindow(h, from, to){ return from<=to ? (h>=from && h<to) : (h>=from || h<to); }
+function urgency(v){ const x=Math.max(0,Math.min(100,v))/100; return 0.2 + 1.8*(1-x)*(1-x); } // needs.rs 同款
+function f1(x){ return x==null ? "—" : (Math.round(x*100)/100).toString(); }
+function bName(id){ const b=BEHAVIORS.get(id); return b ? (b.name||b.id) : id; }
+function jobName(id){ if(!id) return "无"; const j=(CFG.jobs||[]).find(j=>j.id===id); return j ? (j.name||j.id) : id; }
+// 遍历树（含子树展开），fn(node) 返回 true 时不再下钻
+function walkTree(node, fn, visited=new Set()){
+  if (fn(node)) return;
+  const t = node.type;
+  if (t==="selector") for (const c of node.children) walkTree(c, fn, visited);
+  else if (t==="gate"||t==="time_gate"||t==="job_gate"||t==="mate_gate") walkTree(node.child, fn, visited);
+  else if (t==="subtree"){ const s=CFG.subtrees?.[node.ref]; if (s && !visited.has(node.ref)){ visited.add(node.ref); walkTree(s, fn, visited); } }
+}
+function treeActions(root){ const out=new Set(); walkTree(root, n=>{ if(n.type==="action") out.add(n.behavior); }); return out; }
+function treeUsesJobs(root){ let uses=false; walkTree(root, n=>{ if(n.type==="job_gate"){ uses=true; return true; } }); return uses; }
+function countActions(root){ return treeActions(root).size; }
+
+// ---------- 配置载入 ----------
+async function loadCfgUrl(url){ const r = await fetch(url); if(!r.ok) throw new Error(`${url} → HTTP ${r.status}`); setCfg(await r.json(), url); }
+function setCfg(json, src){
+  clearErr();
+  CFG = json;
+  BEHAVIORS = new Map((CFG.behaviors||[]).map(b=>[b.id,b]));
+  // 标签页：默认树 + trees 各物种 + 未被任何树引用的孤儿子树
+  TREES = [{key:"", label:"默认树" + (Object.keys(CFG.trees||{}).length ? "" : "（唯一）"), root:CFG.tree}];
+  for (const k of Object.keys(CFG.trees||{})) TREES.push({key:k, label:(SPECIES_LABELS[k]||k)+" "+k, root:CFG.trees[k]});
+  const referenced = new Set();
+  for (const t of TREES) walkTree(t.root, n=>{ if(n.type==="subtree") referenced.add(n.ref); });
+  for (const ref of Object.keys(CFG.subtrees||{}))
+    if (!referenced.has(ref)) TREES.push({key:"#"+ref, label:"子树 "+ref, root:CFG.subtrees[ref]});
+  $("meta").textContent = src + " · " + (CFG.behaviors||[]).length + " 行为 · " + TREES.map(t=>t.label).join(" / ");
+  curTree = TREES[0].key;
+  buildTabs();
+  // 物种→树的映射表更新后，重推日志侧的物种与职业
+  if (LOG){ inferSpecies(); rebuildAgentSelect(); }
+  redraw();
+  fitView();
+}
+function buildTabs(){
+  $("tabs").innerHTML = TREES.map(t=>`<span class="tab${t.key===curTree?" active":""}" data-k="${t.key}">${t.label}</span>`).join("");
+  for (const el of $("tabs").children) el.onclick = ()=>{ curTree = el.dataset.k; selectedPath=null; buildTabs(); redraw(); fitView(); };
+}
+
+// ---------- 日志载入与反推 ----------
+function setLog(text, src){
+  const agents = new Map(), couples = [], jobEvents = [];
+  let meta = null;
+  for (const line of text.split("\n")){
+    const s = line.trim(); if (!s) continue;
+    let ev; try { ev = JSON.parse(s); } catch { continue; }
+    if (ev.t==="meta"){ meta=ev; continue; }
+    if (ev.t==="couple"){ couples.push(ev); A(agents,ev.a); A(agents,ev.b); continue; }
+    if (ev.t==="job_change"){ jobEvents.push(ev); A(agents,ev.agent); continue; }
+    if (ev.t==="snapshot"||ev.t==="decision"||ev.t==="player_command"||ev.t==="depart"){ A(agents,ev.agent); A(agents,ev.agent)[
+      ev.t==="snapshot" ? "snapshots" : ev.t==="decision" ? "decisions" : ev.t==="player_command" ? "commands" : "departed"
+    ].push(ev); continue; }
+    if (ev.t==="summary"){ for (const s2 of ev.agents) A(agents,s2.id).summary=s2; continue; }
+  }
+  for (const a of agents.values()){ a.snapshots.sort((x,y)=>x.tick-y.tick); a.decisions.sort((x,y)=>x.tick-y.tick); }
+  jobEvents.sort((x,y)=>x.tick-y.tick); couples.sort((x,y)=>x.tick-y.tick);
+  LOG = {agents, couples, jobEvents, meta, maxTick: Math.max(meta?.ticks ?? 0, ...[...agents.values()].flatMap(a=>a.snapshots.map(s=>s.tick)), 0)};
+  $("loglabel").classList.add("ok"); $("loglabel").firstChild.textContent = "② 日志 " + (src||"") + "（已载入）";
+  inferSpecies(); rebuildAgentSelect();
+  $("livebar").classList.add("on");
+  $("tick").max = LOG.maxTick;
+  setTick(Math.min(liveTick, LOG.maxTick));
+}
+function A(agents, id){
+  if (!agents.has(id)) agents.set(id, {id, snapshots:[], decisions:[], commands:[], departed:[], summary:null});
+  return agents.get(id);
+}
+// 物种反推：代理快照权重表的键 + 实际选过的行为 ⊆ 哪棵树的叶行为集，覆盖最多者胜
+function inferSpecies(){
+  const species = new Map();
+  if (!CFG) { LOG.species = species; return; }
+  const cand = TREES.filter(t=>!t.key.startsWith("#")).map(t=>({key:t.key, acts:treeActions(t.root)}));
+  for (const a of LOG.agents.values()){
+    const seen = new Set();
+    for (const s of a.snapshots) for (const k of Object.keys(s.weights||{})) seen.add(k.split("#")[0]);
+    for (const d of a.decisions) seen.add(d.choice.split("#")[0]);
+    let best = "", bestScore = -1;
+    for (const c of cand){
+      let score = 0; for (const b of seen) if (c.acts.has(b)) score++;
+      if (score > bestScore){ best = c.key; bestScore = score; }
+    }
+    species.set(a.id, best); // "" = 默认树
+  }
+  // 开局职业重放：与 world.rs World::new 同款确定性算法——
+  // 按岗位序（slots>0）把名额发给 id 序里树上带职业门的代理。
+  const initJobs = new Map();
+  const ids = [...LOG.agents.keys()].sort((x,y)=>x-y);
+  const eligible = id => { const t = TREES.find(t=>t.key===species.get(id)); return t ? treeUsesJobs(t.root) : treeUsesJobs(CFG.tree); };
+  let next = 0;
+  for (const job of (CFG?.jobs||[]).filter(j=>(j.slots??0)>0)){
+    for (let i=0;i<job.slots;i++){
+      while (next<ids.length && !eligible(ids[next])) next++;
+      if (next>=ids.length) break;
+      initJobs.set(ids[next], job.id); next++;
+    }
+  }
+  LOG.species = species; LOG.initJobs = initJobs;
+}
+function jobAt(agentId, tick){
+  let job = LOG.initJobs?.get(agentId) ?? null;
+  for (const ev of LOG.jobEvents) if (ev.agent===agentId && ev.tick<=tick) job = ev.to ?? null;
+  return job;
+}
+function mateAt(agentId, tick){
+  let mate = false;
+  for (const ev of LOG.couples) if (ev.tick<=tick && (ev.a===agentId||ev.b===agentId)) mate = ev.started;
+  return mate;
+}
+// 快照插值：needs / wallet / weights（权重取 ≤tick 的最近一份，行为级即可，不必插值）
+function lerpSnap(a, b, t, key){
+  if (!a) return b ? b[key] : null;
+  if (!b || b.tick===a.tick) return a[key];
+  const k = (t-a.tick)/(b.tick-a.tick);
+  const va=a[key], vb=b[key];
+  if (typeof va !== "number" || typeof vb !== "number") return va ?? vb;
+  return va + (vb-va)*k;
+}
+function snapAround(a, tick){
+  let lo=null, hi=null;
+  for (const s of a.snapshots){ if (s.tick<=tick) lo=s; else { hi=s; break; } }
+  return [lo ?? hi, hi];
+}
+function liveCtx(agentId, tick){
+  const a = LOG.agents.get(agentId); if (!a) return null;
+  const [lo,hi] = snapAround(a, tick);
+  const needs = {};
+  for (const k of Object.keys(NEED_LABELS)){
+    const va = lo?.needs?.[k], vb = hi?.needs?.[k];
+    if (va==null) needs[k] = vb ?? null;
+    else if (vb==null || lo.tick===hi.tick) needs[k] = va;
+    else needs[k] = va + (vb-va)*(tick-lo.tick)/(hi.tick-lo.tick);
+  }
+  let decision = null;
+  for (const d of a.decisions) if (d.tick<=tick) decision=d;
+  return {
+    live:true, a, tick, hour:hourOf(tick), needs,
+    wallet: lerpSnap(lo,hi,tick,"wallet"),
+    willpower: lerpSnap(lo,hi,tick,"willpower"),
+    weights: lo?.weights ?? {},
+    job: jobAt(agentId, tick), mate: mateAt(agentId, tick),
+    decision, choice: decision ? decision.choice.split("#")[0] : null,
+  };
+}
+
+// ---------- 渲染树构建（子树内联展开，可折叠） ----------
+function buildR(node, path){
+  const t = node.type, st = NODE_STYLE[t];
+  const r = {path, type:t, raw:node, color:st.color, children:[], state:"neutral", reason:null};
+  if (t==="selector"){
+    r.main = "选择器";
+    r.sub = node.children.length + " 个分支";
+    r.children = node.children.map((c,i)=>buildR(c, path+"/"+i));
+  } else if (t==="gate"){
+    r.main = "需求门"; r.cond = `${needLabel(node.need)} < ${node.below}`;
+    r.sub = r.cond;
+    r.children = [buildR(node.child, path+"/g")];
+  } else if (t==="time_gate"){
+    r.main = "时间门"; r.cond = `${node.from}–${node.to} 点`;
+    r.sub = r.cond;
+    r.children = [buildR(node.child, path+"/g")];
+  } else if (t==="job_gate"){
+    r.main = "职业门"; r.cond = jobName(node.job);
+    r.sub = r.cond;
+    r.children = [buildR(node.child, path+"/g")];
+  } else if (t==="mate_gate"){
+    r.main = "伴侣门"; r.cond = "恋爱中";
+    r.children = [buildR(node.child, path+"/g")];
+  } else if (t==="subtree"){
+    r.main = "子树 " + node.ref;
+    const sub = CFG.subtrees?.[node.ref];
+    r.badRef = !sub;
+    if (!sub) r.sub = "⚠ 引用缺失";
+    else if (COLLAPSED.has(path)) r.sub = "▸ " + countActions(sub) + " 项行为";
+    else { r.sub = "▾ " + countActions(sub) + " 项行为"; r.children = [buildR(sub, path+"//"+node.ref)]; }
+  } else if (t==="action"){
+    const b = BEHAVIORS.get(node.behavior);
+    r.behavior = node.behavior;
+    r.main = b ? (b.name||b.id) : node.behavior;
+    r.unregistered = !b;
+    r.sub = node.behavior;
+  }
+  return r;
+}
+
+// ---------- live 评估（tree.rs available_behaviors 的 JS 同构 + 行为级门槛/钱包） ----------
+function evalTree(r, ctx, pathOpen){
+  // 先算自身这道门
+  let open = pathOpen, reason = null;
+  const n = r.raw;
+  if (pathOpen && ctx){
+    if (r.type==="gate"){
+      const v = ctx.needs[n.need];
+      if (v==null){ open=false; reason=`未知需求 ${n.need}`; }
+      else if (v >= n.below){ open=false; reason=`${needLabel(n.need)} ${Math.round(v)} ≥ ${n.below}`; }
+    } else if (r.type==="time_gate"){
+      if (!inHourWindow(ctx.hour, n.from, n.to)){ open=false; reason=`${ctx.hour} 点不在 ${n.from}–${n.to} 点`; }
+    } else if (r.type==="job_gate"){
+      if (ctx.job !== n.job){ open=false; reason=`职业是 ${jobName(ctx.job)} ≠ ${jobName(n.job)}`; }
+    } else if (r.type==="mate_gate"){
+      if (!ctx.mate){ open=false; reason="单身"; }
+    }
+  }
+  r.state = ctx==null ? "neutral" : (open ? "open" : "closed");
+  r.reason = reason;
+  r.liveSub = null;
+  const acts = [];
+  if (!open){ for (const c of r.children) markClosed(c); return acts; }
+  if (r.type==="action"){
+    const b = BEHAVIORS.get(r.behavior);
+    let avail = true;
+    if (ctx && b){
+      if (b.gate_need && b.gate_below!=null){
+        const v = ctx.needs[b.gate_need];
+        if (v==null || v >= b.gate_below){ avail=false; r.reason=`行为门：${needLabel(b.gate_need)} ${v==null?"?":Math.round(v)} ≥ ${b.gate_below}`; }
+      }
+      if (avail && (b.cost??0) > 0 && typeof ctx.wallet==="number" && ctx.wallet < b.cost){
+        avail=false; r.reason=`钱包 ¥${Math.round(ctx.wallet)} < 价格 ¥${b.cost}`;
+      }
+    }
+    r.state = ctx ? (avail ? "available" : "closed") : "neutral";
+    if (r.unregistered){ r.state="closed"; r.reason="行为未注册"; }
+    if (!r.unregistered && avail && r.behavior) acts.push(r);
+    return acts;
+  }
+  for (const c of r.children) for (const a of evalTree(c, ctx, open)) if (!acts.includes(a)) acts.push(a);
+  return acts;
+}
+function markClosed(r){ r.state="closed"; if(r.reason==null) r.reason="上游门关"; for (const c of r.children) markClosed(c); }
+
+// ---------- 布局与绘制 ----------
+let ROOT = null, AVAIL = [];
+function redraw(){
+  if (!CFG) return;
+  const tree = TREES.find(t=>t.key===curTree) ?? TREES[0];
+  ROOT = buildR(tree.root, curTree||"d");
+  const ctx = LOG ? liveCtx(liveAgent, liveTick) : null;
+  AVAIL = evalTree(ROOT, ctx, true);
+  // 布局：叶子按序占行，父节点居中于子
+  let leaf = 0;
+  (function layout(r, depth){
+    r.depth = depth;
+    if (!r.children.length){ r.row = leaf++; return; }
+    for (const c of r.children) layout(c, depth+1);
+    r.row = (r.children[0].row + r.children[r.children.length-1].row)/2;
+  })(ROOT, 0);
+  const x = r => 40 + r.depth*LX, y = r => 30 + r.row*ROW_H;
+  // live 状态下给子标题补当前值
+  if (ctx) annotateLive(ROOT, ctx);
+  // SVG
+  const parts = [];
+  (function edges(r){
+    for (const c of r.children){
+      const x1=x(r)+NW, y1=y(r)+NH/2, x2=x(c), y2=y(c)+NH/2;
+      const closed = r.state==="closed" || c.state==="closed";
+      parts.push(`<path d="M${x1} ${y1} C ${x1+34} ${y1}, ${x2-34} ${y2}, ${x2} ${y2}" fill="none" stroke="${closed?"#4a4f5a":"#5a6272"}" stroke-width="1.4" ${closed?"stroke-dasharray='4 3'":""} opacity="${closed?0.6:1}"/>`);
+      edges(c);
+    }
+  })(ROOT);
+  (function nodes(r){
+    const px=x(r), py=y(r);
+    const sel = r.path===selectedPath;
+    const chosen = ctx && r.type==="action" && ctx.choice===r.behavior;
+    const st = r.state;
+    const stroke = st==="closed" ? "#5a4a52" : r.color;
+    const fillOp = st==="closed" ? 0.05 : st==="available"||st==="open" ? 0.16 : 0.10;
+    let cls = st;
+    if (r.unregistered || r.badRef) cls = "bad";
+    parts.push(`<g class="node" data-path="${r.path}" transform="translate(${px},${py})" style="cursor:pointer">`);
+    if (sel) parts.push(`<rect x="-4" y="-4" width="${NW+8}" height="${NH+8}" rx="11" fill="none" stroke="#d8dce4" stroke-width="1.6" opacity="0.9"/>`);
+    if (chosen) parts.push(`<rect x="-2.5" y="-2.5" width="${NW+5}" height="${NH+5}" rx="10" fill="none" stroke="#e0af68" stroke-width="2.6"/>`);
+    parts.push(`<rect width="${NW}" height="${NH}" rx="8" fill="${r.color}" fill-opacity="${fillOp}" stroke="${stroke}" stroke-width="${r.type==="subtree"?1.4:1.8}" ${r.type==="subtree"?'stroke-dasharray="6 3"':''} ${st==="closed"?'stroke-dasharray="4 3"':''}/>`);
+    const mainColor = st==="closed" ? "#8a91a0" : (r.unregistered||r.badRef) ? "#f7768e" : "#e8ecf4";
+    parts.push(`<text x="12" y="19" font-size="13" font-weight="600" fill="${mainColor}">${r.type==="action"&&chosen?"★ ":""}${esc(r.main)}</text>`);
+    const subColor = st==="closed" ? "#c98a9a" : "#9aa2b2";
+    parts.push(`<text x="12" y="36" font-size="10.5" fill="${subColor}">${esc(r.liveSub ?? r.sub)}</text>`);
+    if (r.type==="subtree" && CFG.subtrees?.[r.raw.ref]){
+      const collapsed = COLLAPSED.has(r.path);
+      parts.push(`<g class="tgl" data-path="${r.path}" transform="translate(${NW-22},${NH/2-9})"><rect width="18" height="18" rx="4" fill="#2a2f38" stroke="${r.color}" stroke-width="1"/><text x="9" y="13" text-anchor="middle" font-size="11" fill="${r.color}">${collapsed?"+":"−"}</text></g>`);
+    }
+    parts.push(`</g>`);
+    for (const c of r.children) nodes(c);
+  })(ROOT);
+  world.innerHTML = parts.join("");
+  world.setAttribute("transform", `translate(${view.tx},${view.ty}) scale(${view.s})`);
+  // 交互
+  for (const g of world.querySelectorAll("g.node")) g.onclick = e=>{ selectedPath = g.dataset.path; redraw(); showDetail(); };
+  for (const g of world.querySelectorAll("g.tgl")){
+    g.onclick = e=>{ e.stopPropagation();
+      const p = g.dataset.path;
+      COLLAPSED.has(p) ? COLLAPSED.delete(p) : COLLAPSED.add(p);
+      redraw();
+    };
+  }
+  renderAvail(ctx);
+}
+function annotateLive(r, ctx){
+  if (r.type==="gate"){
+    const v = ctx.needs[r.raw.need];
+    r.liveSub = `${needLabel(r.raw.need)} < ${r.raw.below}` + (v!=null ? ` · 现在 ${Math.round(v)}` : "");
+  } else if (r.type==="time_gate"){
+    r.liveSub = `${r.raw.from}–${r.raw.to} 点 · 现在 ${ctx.hour} 点`;
+  } else if (r.type==="job_gate"){
+    r.liveSub = `要求 ${jobName(r.raw.job)} · 他是 ${jobName(ctx.job)}`;
+  } else if (r.type==="mate_gate"){
+    r.liveSub = ctx.mate ? "恋爱中 ✓" : "单身";
+  } else if (r.type==="action"){
+    const w = ctx.weights[r.behavior];
+    r.liveSub = r.behavior + (w!=null ? ` · 权重 ${f1(w)}` : "");
+  }
+  for (const c of r.children) annotateLive(c, ctx);
+}
+function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+// ---------- 详情面板 ----------
+function findNode(path){
+  let r = null;
+  (function dfs(n){ if (n.path===path){ r=n; return; } for (const c of n.children) dfs(c); })(ROOT);
+  return r;
+}
+function kv(k,v){ return `<div class="kv"><span>${k}</span><span>${v}</span></div>`; }
+function showDetail(){
+  const el = $("detail");
+  const r = selectedPath ? findNode(selectedPath) : null;
+  if (!r){ el.innerHTML = `<span class="hint">点击树上的节点查看。</span>`; return; }
+  const ctx = LOG ? liveCtx(liveAgent, liveTick) : null;
+  let h = `<div style="font-size:14px;font-weight:600;color:${r.state==="closed"?"#8a91a0":r.color}">${esc(r.main)}</div>`;
+  if (r.state==="closed" && r.reason) h += `<div style="color:#f7768e;font-size:12px;margin:2px 0 6px">⛔ ${esc(r.reason)}</div>`;
+  if (r.type==="selector") h += `<p class="hint" style="font-size:12px;margin:4px 0">收集所有子分支的行为，全部交给数值层按权重 softmax 选择——结构层不做取舍，选择器的"选择"发生在权重层。</p>`;
+  if (r.type==="gate") h += kv("放行条件", `${needLabel(r.raw.need)} < ${r.raw.below}`) + (ctx&&ctx.needs[r.raw.need]!=null?kv("当前值", f1(ctx.needs[r.raw.need])):"");
+  if (r.type==="time_gate") h += kv("放行窗口", `${r.raw.from}–${r.raw.to} 点（含头不含尾，可跨零点）`) + (ctx?kv("当前小时", ctx.hour+" 点"):"");
+  if (r.type==="job_gate") h += kv("放行职业", jobName(r.raw.job)) + (ctx?kv("当前职业", jobName(ctx.job)):"");
+  if (r.type==="mate_gate") h += kv("放行条件", "有恋人") + (ctx?kv("当前状态", ctx.mate?"恋爱中":"单身"):"");
+  if (r.type==="subtree") h += kv("子树", r.raw.ref) + kv("行为数", countActions(CFG.subtrees?.[r.raw.ref])) ;
+  const b = BEHAVIORS.get(r.behavior);
+  if (r.type==="action"){
+    if (!b){ h += `<div style="color:#f7768e;font-size:12.5px">行为未在注册表中（校验应拦截）。</div>`; }
+    else {
+      h += kv("ID", b.id) + kv("基准权重", b.base_weight);
+      if (ctx){
+        const w = ctx.weights[b.id];
+        h += kv("当前权重", w!=null?f1(w):"—");
+        const drive = Object.entries(b.effects||{}).filter(([k,v])=>v>0&&NEED_LABELS[k]).sort((a,b)=>b[1]-a[1])[0];
+        if (drive && w!=null && ctx.needs[drive[0]]!=null)
+          h += kv("权重×紧迫度 ≈", f1(w*urgency(ctx.needs[drive[0]])));
+        if (ctx.choice===b.id && ctx.decision){
+          const f = ctx.decision.factors;
+          h += `<div style="margin-top:6px;color:#e0af68;font-size:12.5px">★ 此刻的实际选择</div>`
+            + kv("总权重", f1(f.weight)) + kv("需求乘数", f1(f.need_mult)) + kv("记忆乘数", f1(f.mem_mult))
+            + kv("地点乘数", f1(f.area_mult)) + kv("来源", f.forced?"生理反射":f.will_command?"玩家指令":f.habit_auto?"习惯自动化":(ctx.decision.imitated?"跟着父母做":"概率 softmax"));
+        }
+      }
+      h += kv("时长", `${b.duration_min}–${b.duration_max} 拍`);
+      const eff = Object.entries(b.effects||{}).map(([k,v])=>`${needLabel(k)} ${v>0?"+":""}${v}`).join("，");
+      if (eff) h += kv("需求影响", eff);
+      if (b.gate_need) h += kv("行为门", `${needLabel(b.gate_need)} < ${b.gate_below}`);
+      if ((b.cost??0)>0) h += kv("价格", "¥"+b.cost) + (ctx&&typeof ctx.wallet==="number"?kv("当前钱包", "¥"+Math.round(ctx.wallet)):"");
+      if (b.tags?.length) h += kv("标签", b.tags.join(" "));
+      const spot = (CFG.spots||[]).find(s=>s.id===b.spot);
+      if (spot) h += kv("地点", `${spot.id}${spot.area?"（"+spot.area+"）":""}`);
+      if (b.pick_target) h += kv("社交", "开始时选对象（亲密×新鲜×可及×印象）");
+      if (b.crime) h += kv("犯罪", "结算作案与被抓");
+      if (b.clean_effect) h += kv("整洁恢复", "+"+b.clean_effect);
+      if (b.patrol_boost) h += kv("巡逻度", "+"+b.patrol_boost);
+      if (b.honesty_bias) h += kv("诚实度斜率", b.honesty_bias);
+      if (b.pressure_bias) h += kv("经济压力斜率", b.pressure_bias);
+      if (b.variants?.length){
+        h += `<div style="margin-top:6px;color:var(--dim);font-size:12px">变体（吃什么）</div>`;
+        for (const v of b.variants.slice(0,8)) h += `<div style="font-size:12px;padding:1px 0">· ${esc(v.name||v.id)}${v.cost!=null?" ¥"+v.cost:""}${v.tags?.length?" ["+v.tags.join("/")+"]":""}</div>`;
+      }
+    }
+  }
+  el.innerHTML = h;
+}
+
+// ---------- 可用行为列表 ----------
+function renderAvail(ctx){
+  const title = $("avtitle"), list = $("avlist");
+  if (!ctx){
+    const acts = [...treeActions(TREES.find(t=>t.key===curTree).root)];
+    title.textContent = `全部行为（${acts.length}）· 基准权重`;
+    list.innerHTML = acts.map(id=>({id,w:BEHAVIORS.get(id)?.base_weight??0}))
+      .sort((a,b)=>b.w-a.w).map(a=>`<div data-b="${a.id}"><span>${esc(bName(a.id))}</span><span class="w">${f1(a.w)}</span></div>`).join("");
+  } else {
+    title.textContent = `此刻可用（${AVAIL.length}）· 代理权重`;
+    list.innerHTML = AVAIL.map(r=>{
+      const w = ctx.weights[r.behavior] ?? BEHAVIORS.get(r.behavior)?.base_weight ?? 0;
+      return {r,w};
+    }).sort((a,b)=>b.w-a.w).map(({r,w})=>
+      `<div data-b="${r.behavior}"><span>${ctx.choice===r.behavior?'<span class="star">★ </span>':""}${esc(r.main)}</span><span class="w">${f1(w)}</span></div>`).join("")
+      || `<div class="hint">这个时刻没有可用行为（全部门都关着？）</div>`;
+    const closed = (function count(r){ let n = r.state==="closed"&&r.type==="action" ? 1 : 0; for (const c of r.children) n+=count(c); return n; })(ROOT);
+    if (closed) title.textContent += ` · 另有 ${closed} 项被门挡住`;
+  }
+  for (const d of list.querySelectorAll("div[data-b]")) d.onclick = ()=>{
+    (function dfs(n){ if (n.type==="action" && n.behavior===d.dataset.b){ selectedPath = n.path; return true; } return n.children.some(dfs); })(ROOT);
+    redraw(); showDetail(); centerOnSelected();
+  };
+}
+function centerOnSelected(){
+  const r = selectedPath ? findNode(selectedPath) : null; if (!r) return;
+  const px = 40 + r.depth*LX + NW/2, py = 30 + r.row*ROW_H + NH/2;
+  const rect = svg.getBoundingClientRect();
+  view.s = Math.max(view.s, 0.8);
+  view.tx = rect.width/2 - px*view.s; view.ty = rect.height/2 - py*view.s;
+  redraw();
+}
+
+// ---------- live 控件 ----------
+function rebuildAgentSelect(){
+  const sel = $("agentSel");
+  const ids = [...LOG.agents.keys()].sort((a,b)=>a-b);
+  sel.innerHTML = ids.map(id=>{
+    const a = LOG.agents.get(id);
+    const sp = LOG.species.get(id);
+    const spLabel = sp==="" ? "默认树" : (SPECIES_LABELS[sp]||sp);
+    return `<option value="${id}"${id===liveAgent?" selected":""}>${esc(a.summary?.name ?? "#"+id)}（${id} · ${spLabel}${a.summary?.departed_tick!=null?" 🧳":""}）</option>`;
+  }).join("");
+  updateAgentInfo();
+}
+function updateAgentInfo(){
+  const a = LOG.agents.get(liveAgent); if (!a) return;
+  const s = a.summary;
+  $("agentInfo").textContent = [
+    s?.lover ? "恋人 " + s.lover : null,
+    s?.age_days!=null ? Math.floor(s.age_days)+" 岁（模拟日）" : null,
+    s?.departed_tick!=null ? "已离场 🧳" : null,
+  ].filter(Boolean).join(" · ");
+}
+function setTick(t){
+  liveTick = Math.max(0, Math.min(t, LOG?LOG.maxTick:0));
+  $("tick").value = liveTick; $("tickNum").value = liveTick;
+  $("clock").textContent = fmtTick(liveTick);
+  redraw(); showDetail();
+}
+$("agentSel").onchange = e=>{ liveAgent = +e.target.value; updateAgentInfo(); redraw(); showDetail(); };
+$("tick").oninput = e=>setTick(+e.target.value);
+$("tickNum").onchange = e=>setTick(+e.target.value||0);
+$("play").onclick = ()=>{
+  if (playing){ clearInterval(playing); playing=null; $("play").textContent="▶ 播放"; return; }
+  $("play").textContent = "⏸ 暂停";
+  playing = setInterval(()=>{ if (liveTick>=LOG.maxTick){ $("play").click(); return; } setTick(liveTick+30); }, 120);
+};
+
+// ---------- 平移缩放 ----------
+function applyView(){ world.setAttribute("transform", `translate(${view.tx},${view.ty}) scale(${view.s})`); }
+$("zoomIn").onclick = ()=>zoomAt(svg.getBoundingClientRect().width/2, svg.getBoundingClientRect().height/2, 1.25);
+$("zoomOut").onclick = ()=>zoomAt(svg.getBoundingClientRect().width/2, svg.getBoundingClientRect().height/2, 0.8);
+$("zoomFit").onclick = fitView;
+function zoomAt(mx,my,k){
+  const s2 = Math.min(3, Math.max(0.18, view.s*k)); k = s2/view.s;
+  view.tx = mx-(mx-view.tx)*k; view.ty = my-(my-view.ty)*k; view.s = s2; applyView();
+}
+function fitView(){
+  if (!ROOT) return;
+  let maxDepth=0, maxRow=0;
+  (function dfs(r){ maxDepth=Math.max(maxDepth,r.depth); maxRow=Math.max(maxRow,r.row); for(const c of r.children) dfs(c); })(ROOT);
+  const w = 40+NW+maxDepth*LX+40, h = 30+NH+maxRow*ROW_H+30;
+  const rect = svg.getBoundingClientRect();
+  view.s = Math.min(rect.width/w, rect.height/h, 1.1);
+  view.tx = (rect.width - w*view.s)/2; view.ty = Math.max(16,(rect.height - h*view.s)/2);
+  applyView();
+}
+let drag = null;
+svg.addEventListener("pointerdown", e=>{ drag = {x:e.clientX, y:e.clientY, tx:view.tx, ty:view.ty}; svg.setPointerCapture(e.pointerId); });
+svg.addEventListener("pointermove", e=>{ if (!drag) return; view.tx = drag.tx + e.clientX-drag.x; view.ty = drag.ty + e.clientY-drag.y; applyView(); });
+svg.addEventListener("pointerup", ()=>drag=null);
+svg.addEventListener("wheel", e=>{ e.preventDefault(); const r=svg.getBoundingClientRect(); zoomAt(e.clientX-r.left, e.clientY-r.top, Math.exp(-e.deltaY*0.0012)); }, {passive:false});
+window.addEventListener("resize", ()=>{});
+
+// ---------- 顶部按钮 ----------
+$("expandAll").onclick = ()=>{ COLLAPSED.clear(); redraw(); };
+$("collapseAll").onclick = ()=>{
+  (function dfs(n){ if (n.type==="subtree") COLLAPSED.add(n.path); for (const c of n.children) dfs(c); })(buildR(TREES.find(t=>t.key===curTree).root, curTree||"d"));
+  redraw();
+};
+
+// ---------- 图例 ----------
+$("legend").innerHTML =
+  Object.entries(NODE_STYLE).map(([k,v])=>`<span><span class="sw" style="background:${v.color}33;border:1px solid ${v.color}"></span>${v.label}</span>`).join("")
+  + `<span style="margin-left:8px">实时评估：</span><span><span class="sw" style="border:1px dashed #5a4a52"></span>门关/不可用</span>`
+  + `<span><span class="sw" style="border:2.5px solid #e0af68"></span>★ 实际选择</span>`
+  + `<span>滚轮缩放 · 拖拽平移 · 点子树角上 −/+ 折叠</span>`;
+
+// ---------- 文件输入与 URL 参数 ----------
+$("cfgfile").onchange = async e=>{
+  const f = e.target.files[0]; if (!f) return;
+  try { setCfg(JSON.parse(await f.text()), f.name); $("cfglabel").classList.add("ok"); }
+  catch (ex){ err("配置解析失败：" + ex.message); }
+};
+$("logfile").onchange = async e=>{
+  const f = e.target.files[0]; if (!f) return;
+  if (!CFG){ err("先载入配置 JSON，再载入日志（物种反推需要树结构）。"); return; }
+  try { setLog(await f.text(), f.name); } catch (ex){ err("日志解析失败：" + ex.message); }
+};
+(async function init(){
+  const q = new URLSearchParams(location.search);
+  const isHttp = location.protocol==="http:"||location.protocol==="https:";
+  if (isHttp){
+    const cfgUrl = q.get("cfg") || "assets/town.json";
+    try { await loadCfgUrl(cfgUrl); } catch (e){ err("自动载入 "+cfgUrl+" 失败（可用文件选择器手动载入）："+e.message); }
+    const logUrl = q.get("log");
+    if (logUrl){ try { setLog(await (await fetch(logUrl)).text(), logUrl); } catch (e){ err("载入日志失败："+e.message); } }
+  }
+  if (q.get("tree")){ const t = TREES.find(t=>t.key===q.get("tree")); if (t){ curTree=t.key; buildTabs(); redraw(); } }
+  if (LOG && q.get("agent")){ liveAgent = +q.get("agent"); rebuildAgentSelect(); }
+  if (LOG && q.get("tick")) setTick(+q.get("tick"));
+  if (!CFG) $("meta").textContent = isHttp ? "" : "file:// 打开：用上方选择器载入配置与日志；或用本地服务器访问并加 ?cfg=assets/town.json";
+})();
+</script>
+</body>
+</html>

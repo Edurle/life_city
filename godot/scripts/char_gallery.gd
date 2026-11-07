@@ -17,6 +17,7 @@ const FACE_Y_RATIO := 0.93    # 特写目标高度 = 包围盒底部 + 身高 ×
 const FACE_DIST := 0.9        # 特写机位距离 = 身高 × 此值
 
 var model_path := ""
+var diag_only := false
 var cam: Camera3D
 var key: DirectionalLight3D
 var floor_mi: MeshInstance3D
@@ -30,6 +31,8 @@ func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--model="):
 			model_path = arg.substr(8)
+		elif arg == "--diag":
+			diag_only = true
 	if model_path == "" or not ResourceLoader.exists(model_path):
 		push_error("[gallery] 需 --model=res://...（工程内路径，先 --headless --import）：%s" % model_path)
 		get_tree().quit(1)
@@ -38,10 +41,13 @@ func _ready() -> void:
 	var inst: Node = (load(model_path) as PackedScene).instantiate()
 	add_child(inst)
 	await get_tree().process_frame          # 让导入场景的变换生效
+	_print_materials(inst)
+	if diag_only:
+		get_tree().quit()
+		return
 	if not _measure():
 		get_tree().quit(1)
 		return
-	_print_materials(inst)
 	_plan_shots()
 	_apply_shot(0)
 
@@ -105,6 +111,23 @@ func _measure() -> bool:
 	return true
 
 func _print_materials(inst: Node) -> void:
+	for sk in find_children("*", "Skeleton3D", true, false):
+		var s := sk as Skeleton3D
+		var human := PackedStringArray()
+		for bi in s.get_bone_count():
+			var n: String = s.get_bone_name(bi)
+			var ln := n.to_lower()
+			if ln.contains("hip") or ln.contains("spine") or ln.contains("upleg") or ln.contains("lowerleg") or ln.contains("upperarm") or ln.contains("lowerarm") or ln.contains("hand") or ln.contains("foot") or ln.contains("shoulder") or ln.contains("neck") or ln.contains("head"):
+				human.append(n)
+		print("[gallery] 骨骼 %d 根，人体位 %d：%s" % [s.get_bone_count(), human.size(), ", ".join(human.slice(0, 34))])
+	for ap_n in inst.find_children("*", "AnimationPlayer", true, false):
+		var apx := ap_n as AnimationPlayer
+		for a in apx.get_animation_list():
+			var anim: Animation = apx.get_animation(a)
+			var kinds := {}
+			for t in anim.get_track_count():
+				kinds[anim.track_get_type(t)] = kinds.get(anim.track_get_type(t), 0) + 1
+			print("[gallery] 动画 %s：轨道 %d %s 长 %.2fs 首轨 %s" % [a, anim.get_track_count(), str(kinds), anim.length, anim.track_get_path(0)])
 	var seen := {}
 	for mi: MeshInstance3D in inst.find_children("*", "MeshInstance3D", true, false):
 		for idx in mi.get_surface_override_material_count():
