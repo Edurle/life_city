@@ -1,25 +1,24 @@
 #!/usr/bin/env bash
 # 运行时资产同步：外部资产库（~/city_life_assets/runtime）→ 工程运行时目录。
-# 现状（架子）：characters/*.vrm、anims/*.vrma 还留 in git（量小）；等模型超过
-# ~30 个或目录超 500MB 时，把它们移入外部库 runtime/ 并在此登记映射，然后
-# "克隆代码 → 跑本脚本" 即可还原运行时资产；清单用 scripts/asset_manifest.sh 生成。
+# VRM 模型与 VRMA 动画不进 git（.gitignore），正本住外部库；克隆代码后：
+#   scripts/sync_assets.sh && godot --headless --import   # .import 参数已在 git，import 只生成 .godot 产物
+# （anims/*.vrma 不走 import，拷回即用；ch46.glb 兜底小人留在 git，未同步也能跑。）
+# 不用 --delete：工程目录里还有 .import 等跟踪文件；外部库删文件后手动清理对应工程文件即可。
 # 资产库备份：rsync 到移动盘/NAS/云盘（不走 git）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ROOT="${1:-$HOME/city_life_assets}"
 
-# 映射表：外部库相对路径 → 工程内目标目录（将来自行添加行）
+# 映射表：外部库相对路径 → 工程内目标目录
 declare -A MAP=(
-	# ["runtime/characters"]="godot/assets3d/characters"
-	# ["runtime/anims"]="godot/assets3d/characters/anims"
+	["runtime/characters"]="godot/assets3d/characters"
+	["runtime/anims"]="godot/assets3d/characters/anims"
 )
 
-if [[ ${#MAP[@]} -eq 0 ]]; then
-	echo "运行时资产暂留 git（characters/*.vrm、anims/*.vrma），无外部同步项。"
-	echo "外部库 $ROOT 就绪状态：$([[ -d $ROOT ]] && echo 是 || echo 否)。"
-	echo "迁移时：资产移入 $ROOT/runtime/ → 取消上方 MAP 注释 → 重跑本脚本。"
-	exit 0
+if [[ ! -d "$ROOT/runtime" ]]; then
+	echo "缺少 $ROOT/runtime（外部资产库未同步？清单见 assets/资产清单.csv）" >&2
+	exit 1
 fi
 
 for src in "${!MAP[@]}"; do
@@ -29,6 +28,6 @@ for src in "${!MAP[@]}"; do
 		continue
 	fi
 	mkdir -p "$dst"
-	rsync -a --delete "$ROOT/$src/" "$dst/"
-	echo "已同步 $src → $dst"
+	rsync -a "$ROOT/$src/" "$dst/"
+	echo "已同步 $src → $dst（$(ls "$ROOT/$src" | wc -l) 个文件）"
 done

@@ -10,3 +10,6 @@ godot/gallery_models/
 /assets/raw/
 godot/assets3d/characters/anims/*.fbx
 godot/assets3d/characters/anims/*.fbx.import
+# 运行时大资产（VRM 模型/VRMA 动画）住外部库，克隆后 scripts/sync_assets.sh 拷回 + godot --headless --import
+godot/assets3d/characters/*.vrm
+godot/assets3d/characters/anims/*.vrma

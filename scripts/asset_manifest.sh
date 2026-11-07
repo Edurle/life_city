@@ -15,7 +15,7 @@ fi
 
 echo "相对路径,大小字节,sha256,类型" > "$OUT"
 cd "$ROOT"
-find raw -type f ! -name ".*" | sort | while read -r f; do
+find raw runtime -type f ! -name ".*" 2>/dev/null | sort | while read -r f; do
 	printf '%s,%s,%s,%s\n' \
 		"$f" \
 		"$(stat -c%s "$f")" \
