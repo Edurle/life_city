@@ -5,3 +5,8 @@ godot/bin/*.so
 /saves
 dist/
 godot/gallery_models/
+
+# 资产分层：原料住外部库 ~/city_life_assets（清单见 assets/资产清单.csv），本地保留但不入库
+/assets/raw/
+godot/assets3d/characters/anims/*.fbx
+godot/assets3d/characters/anims/*.fbx.import
